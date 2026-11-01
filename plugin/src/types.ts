@@ -16,6 +16,7 @@ export interface BundleFrame {
   role: FrameRole;
   rootId: string;
   name: string;
+  page: string;
   width: number;
   height: number;
   referenceAssets: string[];

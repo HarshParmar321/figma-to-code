@@ -16,7 +16,7 @@ export async function exportReference(frame: SceneNode, role: FrameRole, diagnos
       const bytes = await frame.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
       out.push({
         meta: {
-          id: `ref-${role}-${scale}x`, kind: 'reference', format: 'PNG', nodeId: frame.id,
+          id: assetIdFor('ref', `${role}-${frame.id}-${scale}x`), kind: 'reference', format: 'PNG', nodeId: frame.id,
           scale, width: Math.round(frame.width * scale), height: Math.round(frame.height * scale),
           byteLength: bytes.byteLength,
         },
@@ -53,6 +53,28 @@ export async function exportImageFills(hashes: Map<string, string[]>, diagnostic
       });
     } catch (e) {
       diagnostics.push({ nodeId: nodeIds[0] ?? null, code: 'IMAGE_EXPORT_FAILED', severity: 'error', message: String(e) });
+    }
+  }
+  return out;
+}
+
+export async function exportRasters(nodeIds: string[], diagnostics: Diagnostic[]): Promise<ExportedAsset[]> {
+  const out: ExportedAsset[] = [];
+  for (const id of nodeIds) {
+    const node = await figma.getNodeByIdAsync(id);
+    if (!node || !('exportAsync' in node)) continue;
+    try {
+      const bytes = await (node as SceneNode).exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: 2 } });
+      const sn = node as SceneNode;
+      out.push({
+        meta: {
+          id: assetIdFor('png', id), kind: 'raster-export', format: 'PNG', nodeId: id, scale: 2,
+          width: sn.width, height: sn.height, byteLength: bytes.byteLength,
+        },
+        bytes,
+      });
+    } catch (e) {
+      diagnostics.push({ nodeId: id, code: 'PNG_EXPORT_FAILED', severity: 'warning', message: String(e) });
     }
   }
   return out;

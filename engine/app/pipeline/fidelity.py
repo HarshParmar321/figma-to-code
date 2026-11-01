@@ -126,6 +126,50 @@ def _tol(size: float, ratio: float, floor: float) -> float:
     return max(floor, size * ratio)
 
 
+# ----------------------------------------------------------------------------- rendering
+class Renderer:
+    """One Chromium instance reused for every page and correction round of a conversion."""
+
+    def __init__(self, chromium_path: str | None = None):
+        self.chromium_path = chromium_path
+        self._pw = None
+        self._browser = None
+
+    def __enter__(self) -> Renderer:
+        from playwright.sync_api import sync_playwright
+
+        self._pw = sync_playwright().start()
+        launch = {"executable_path": self.chromium_path} if self.chromium_path else {}
+        self._browser = self._pw.chromium.launch(**launch)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        try:
+            if self._browser:
+                self._browser.close()
+        finally:
+            if self._pw:
+                self._pw.stop()
+
+    def capture(self, html_path: Path, width: int, ids: list[str], screenshot: Path) -> tuple[dict, dict]:
+        pg = self._browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=1)
+        try:
+            pg.goto(html_path.resolve().as_uri())
+            pg.add_style_tag(content="*{caret-color:transparent !important}")
+            pg.evaluate(READY_JS)
+            pg.wait_for_timeout(150)
+            pg.screenshot(path=str(screenshot), full_page=True)
+            data = pg.evaluate(COLLECT_JS, ids)
+            overflow = {}
+            for w in RESPONSIVE_WIDTHS:
+                pg.set_viewport_size({"width": w, "height": 900})
+                pg.wait_for_timeout(40)
+                overflow[w] = pg.evaluate("document.documentElement.scrollWidth") > w + 1
+            return data, overflow
+        finally:
+            pg.close()
+
+
 # ----------------------------------------------------------------------------- main
 def verify(
     out_dir: Path,
@@ -134,31 +178,19 @@ def verify(
     expectations: list[dict],
     reference_png: Path,
     chromium_path: str | None = None,
+    renderer: Renderer | None = None,
+    html_file: str = "index.html",
+    write_images: bool = True,
 ) -> dict:
-    from playwright.sync_api import sync_playwright
-
     fidelity_dir.mkdir(parents=True, exist_ok=True)
     width = round(page.width)
     render_png = fidelity_dir / "render.png"
     ids = [e["id"] for e in expectations]
-    overflow = {}
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=chromium_path) if chromium_path else p.chromium.launch()
-        try:
-            pg = browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=1)
-            pg.goto((out_dir / "index.html").resolve().as_uri())
-            pg.add_style_tag(content="*{caret-color:transparent !important}")
-            pg.evaluate(READY_JS)
-            pg.wait_for_timeout(200)
-            pg.screenshot(path=str(render_png), full_page=True)
-            data = pg.evaluate(COLLECT_JS, ids)
-            for w in RESPONSIVE_WIDTHS:
-                pg.set_viewport_size({"width": w, "height": 900})
-                pg.wait_for_timeout(50)
-                sw = pg.evaluate("document.documentElement.scrollWidth")
-                overflow[w] = sw > w + 1
-        finally:
-            browser.close()
+    if renderer is None:
+        with Renderer(chromium_path) as r:
+            data, overflow = r.capture(out_dir / html_file, width, ids, render_png)
+    else:
+        data, overflow = renderer.capture(out_dir / html_file, width, ids, render_png)
 
     got = data["elements"]
     loaded_fonts = {f.lower() for f in data.get("fonts", [])}
@@ -168,6 +200,7 @@ def verify(
     typo_ok = typo_n = 0
     color_ok = color_n = 0
     asset_ok = asset_n = 0
+    measurements: dict[str, dict] = {}
 
     for exp in expectations:
         nid, (ex, ey, ew, eh) = exp["id"], exp["box"]
@@ -185,6 +218,10 @@ def verify(
             ok = all(abs(d) <= _tol(s, 0.01, 2) for d, s in ((dx, ew), (dy, eh), (dw, ew), (dh, eh)))
         geom_n += 1
         geom_ok += ok
+        measurements[nid] = {
+            "dx": round(dx, 2), "dy": round(dy, 2), "dw": round(dw, 2), "dh": round(dh, 2), "ok": bool(ok),
+            "kind": exp["kind"], "parent": exp.get("parent"), "box": exp["box"],
+        }  # fmt: skip
         if not ok:
             off = max(abs(dx), abs(dy), abs(dw), abs(dh))
             issues.append({
@@ -227,7 +264,7 @@ def verify(
             if not c_ok:
                 issues.append({"severity": "minor", "category": "colour", "id": nid, "name": name,
                                "message": f"Background {a['backgroundColor']} vs {exp['background']}"})  # fmt: skip
-        if exp["kind"] in ("image", "svg"):
+        if exp["kind"] in ("image", "svg", "raster"):
             asset_n += 1
             loaded = a["loaded"] is not False
             asset_ok += loaded
@@ -280,7 +317,8 @@ def verify(
     order = {"critical": 0, "major": 1, "minor": 2}
     issues.sort(key=lambda i: (order[i["severity"]], -i.get("offset", 0)))
     band = "Verified" if score >= 90 else "Close" if score >= 75 else "Needs work" if score >= 60 else "Failed"
-    _write_images(ref, ren, fidelity_dir)
+    if write_images:
+        _write_images(ref, ren, fidelity_dir)
     result = {
         "generatedAt": datetime.now(UTC).isoformat(),
         "viewport": width,
@@ -305,6 +343,7 @@ def verify(
         "designHeight": page.height,
         "overflow": {str(k): v for k, v in overflow.items()},
         "missingFonts": sorted(missing_fonts),
+        "measurements": measurements,
         "issues": issues,
     }
     (fidelity_dir / "fidelity.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -312,12 +351,60 @@ def verify(
 
 
 def _node_name(page: Page, nid: str) -> str:
+    if nid.startswith("section:"):
+        sid = nid.rsplit(":", 1)[-1]
+        sec = next((x for x in page.sections if x.id == sid), None)
+        return f"Section · {sec.role or sec.name}" if sec else "Section"
     for e in page.root.walk():
         if e.node is not None and e.node.get("id") == nid:
             if e.kind == "text":
                 return (e.node.get("characters", "") or e.name)[:40].replace("\n", " ")
             return e.name
     return nid
+
+
+def write_compare_images(reference_png: Path, render_png: Path, d: Path) -> None:
+    _write_images(Image.open(reference_png).convert("RGB"), Image.open(render_png).convert("RGB"), d)
+
+
+def write_site_report(result: dict, d: Path, title: str) -> Path:
+    """Summary across pages: one row per page with its score, report and preview."""
+    rows = []
+    for pg in result["pages"]:
+        f = pg.get("fidelity")
+        rel = pg.get("report", "")
+        rel = rel.split("fidelity/", 1)[-1] if rel else ""
+        score = f"{f['score']:.1f}" if f else "–"
+        band = f["band"] if f else "Not checked"
+        fixes = f"{f['corrections']} corrected" if f else ""
+        rows.append(
+            f"<tr><td><b>{html.escape(pg['name'])}</b></td><td class=n>{score}</td><td>{band}</td><td>{fixes}</td>"
+            f"<td><a href='{html.escape(rel)}'>Report</a> · <a href='../output/{html.escape(pg['file'])}'>Preview</a></td></tr>"
+        )
+    comps = ", ".join(html.escape(c) for c in result.get("components", [])) or "none found"
+    f = result["fidelity"]
+    doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Site report · {html.escape(title)}</title>
+<style>
+:root {{ color-scheme: light dark; --bg:#f7f7f8; --card:#fff; --ink:#18181b; --muted:#6b7280; --line:#e5e7eb; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#111113; --card:#1c1c1f; --ink:#f4f4f5; --muted:#a1a1aa; --line:#2e2e33; }} }}
+body {{ margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--ink); }}
+.wrap {{ max-width:960px; margin:0 auto; padding:24px 16px 64px; }}
+h1 {{ font-size:20px; margin:0 0 4px; }} .muted {{ color:var(--muted); }}
+.score {{ font-size:48px; font-weight:700; margin:16px 0 4px; }}
+table {{ width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); margin-top:16px; }}
+td, th {{ padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; }} td.n {{ text-align:right; font-weight:600; }}
+a {{ color:inherit; font-weight:600; }}
+</style></head><body><div class="wrap">
+<h1>Site report</h1><div class="muted">{html.escape(title)} · {len(result["pages"])} pages</div>
+<div class="score">{f["score"]:.1f}</div><div>{f["band"]} · {f["corrections"]} elements auto-corrected</div>
+<div class="muted" style="margin-top:8px">Shared components: {comps}</div>
+<table><tr><th>Page</th><th style="text-align:right">Score</th><th>Result</th><th>Fixes</th><th></th></tr>{"".join(rows)}</table>
+</div></body></html>"""
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "report.html"
+    path.write_text(doc, encoding="utf-8")
+    return path
 
 
 def _write_images(ref: Image.Image, ren: Image.Image, d: Path) -> None:

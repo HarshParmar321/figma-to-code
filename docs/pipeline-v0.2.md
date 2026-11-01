@@ -36,11 +36,26 @@ Second file (services landing page, 1903×3754, 24 SVG graphics, TT Hoves + Popp
 
 Result after fixes: **78/78 elements in place, 97.3% visual similarity**; the remaining gap is the missing TT Hoves font. The first file still scores 99.8.
 
+## v0.3: every design, every page
+
+Goal: accuracy that holds on any design, not tuning per file; multi-page sites with reusable sections.
+
+| Capability | How it works |
+| --- | --- |
+| **Self-correcting loop** | After generating, each page is rendered and every element (and every section) is measured against the design. Elements outside tolerance get a correction, parents before children: sections get their exact height, elements are moved with CSS `translate` (moves visually, never pushes siblings) and non-text elements get their exact size. Re-render, re-measure, up to 6 rounds. Corrections live in `css/corrections.css`, labelled, desktop widths only. Test: a page with 12 elements deliberately pushed 6–40 px off went from 67.5 to 99.9 (88/88 elements, 99.2% visual similarity) in 4 rounds. |
+| **Multi-page sites** | Select one desktop frame per page (and mobile frames). Frames are grouped by page name ("Home / Desktop" + "Home - Mobile" = "Home"). Output: `index.html` + `about.html`… sharing one stylesheet, images and fonts. Site report lists every page's score. |
+| **Shared components** | Sections that are identical on two or more pages (compared by content, positions and image bytes, not layer ids) are generated once: `site-header`, `site-footer`, `shared-<name>`. A header row inside the hero band (logo + nav) is split out as `site-header` when it repeats. Each component is saved in `components/<name>.html`; its classes are shared, so the CSS exists once. Test: 2-page site → site-header, site-footer, About Us and Testimonials shared, identical markup on both pages. |
+| **Image de-duplication** | Identical files (same bytes) become one file used everywhere (20 assets → 7 files in the 2-page test). |
+| **Illustrations** | A container made only of vector shapes is exported as one SVG at any size (previously only icons ≤128 px), or as one 2× PNG above 400 vector pieces. The Peachy Pup file had 4,898 vectors exported one by one plus 2,542 failed exports. |
+| **Background jobs** | `POST /convert` returns immediately; the plugin polls `/convert/status` and shows live steps. Long conversions no longer end in "Failed to fetch". |
+| Bugs fixed | Layout recursion on touching items (Peachy Pup crash); frame sections (Auto Layout files) stacked their children at x=0; sections had two ids; gaps between frame sections were lost. The untouched sample page went from 0/15 to 15/15 elements on the first render. |
+
 ## Known limits (next steps)
 
-1. **Mobile frames:** the generator uses the desktop frame; a mobile frame is read but not yet merged into media queries (desktop/mobile element matching, FR-EXT-14).
+1. **Mobile frames:** read and paired with their page, but not yet merged into media queries (desktop/mobile element matching, FR-EXT-14). This is the next major step.
 2. **Inferred mobile layout** is basic (rows stack below 768 px). Sections that fall back to absolute positioning do not adapt.
 3. **Interactions and motion:** hover variants, Smart Animate and the Motion panel are not generated yet (FR-MOT).
-4. **Auto-fix loop:** issues are reported but not yet patched automatically (FR-FID-17 to 24).
+4. **Visual (non-geometry) fixes:** the loop corrects positions and sizes; wrong colours, effects or fonts are reported but not yet auto-fixed.
 5. **Semantics:** form fields drawn as rectangles stay `div`s; heading levels are inferred from size.
-6. **Tested on two flat files so far.** Next test files: one with Auto Layout and components, one with a mobile frame.
+6. **Real files tested:** two flat landing pages and a large illustrated page (Peachy Pup, re-export needed with the new plugin). Still needed: a file built with Auto Layout and components, and one with a mobile frame.
+7. **Links between pages:** nav items are not yet linked to the generated pages automatically.

@@ -169,13 +169,13 @@ def _upload(client, bundle):
 
 def test_convert_requires_all_assets(client, bundle):
     bundle_id = client.post("/v1/bundles", content=json.dumps(bundle)).json()["bundleId"]
-    res = client.post(f"/v1/bundles/{bundle_id}/convert?verify=false")
+    res = client.post(f"/v1/bundles/{bundle_id}/convert?verify=false&wait=true")
     assert res.status_code == 409
 
 
 def test_convert_and_serve(client, bundle):
     bundle_id = _upload(client, bundle)
-    res = client.post(f"/v1/bundles/{bundle_id}/convert?verify=false")
+    res = client.post(f"/v1/bundles/{bundle_id}/convert?verify=false&wait=true")
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["previewUrl"].endswith(f"/v1/bundles/{bundle_id}/output/index.html")
@@ -191,7 +191,7 @@ def test_convert_and_serve(client, bundle):
 
 def test_output_path_traversal_blocked(client, bundle):
     bundle_id = _upload(client, bundle)
-    client.post(f"/v1/bundles/{bundle_id}/convert?verify=false")
+    client.post(f"/v1/bundles/{bundle_id}/convert?verify=false&wait=true")
     assert client.get(f"/v1/bundles/{bundle_id}/output/..%2Fbundle.json").status_code == 404
     assert client.get(f"/v1/bundles/{bundle_id}/output/../bundle.json").status_code == 404
 
@@ -215,7 +215,7 @@ def test_full_conversion_with_fidelity(client, bundle, monkeypatch):
 
     monkeypatch.setattr(main.settings, "chromium_path", os.environ.get("ENGINE_CHROMIUM_PATH"))
     bundle_id = _upload(client, bundle)
-    body = client.post(f"/v1/bundles/{bundle_id}/convert").json()
+    body = client.post(f"/v1/bundles/{bundle_id}/convert?wait=true").json()
     f = body["fidelity"]
     assert f is not None, body["warnings"]
     assert 0 <= f["score"] <= 100 and f["band"] in ("Verified", "Close", "Needs work", "Failed")

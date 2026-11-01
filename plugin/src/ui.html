@@ -14,6 +14,7 @@
   p.hint { margin: 0 0 12px; color: var(--figma-color-text-secondary, #666); }
   .frame { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--figma-color-border, #e5e5e5); border-radius: 6px; margin-bottom: 6px; }
   .frame .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .frame .page { font-size: 11px; color: var(--figma-color-text-secondary, #666); }
   .frame .size { color: var(--figma-color-text-secondary, #666); font-variant-numeric: tabular-nums; }
   select, input { font: inherit; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc); background: var(--figma-color-bg, #fff); color: inherit; }
   input { width: 100%; }
@@ -59,7 +60,7 @@
 </head>
 <body>
   <h1>Figma to Code</h1>
-  <p class="hint">Select a desktop frame (and its mobile frame if you have one), then convert.</p>
+  <p class="hint">Select one desktop frame per page (Home, About…) and their mobile frames if you have them, then convert. Keep all frames on the same Figma page.</p>
 
   <h2>Selected frames</h2>
   <div id="frames"><div class="empty">Select one or more frames on the canvas.</div></div>

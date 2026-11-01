@@ -31,6 +31,12 @@ def test_root_must_exist(bundle):
     assert any("rootId nope" in e for e in validate_bundle(bundle))
 
 
-def test_exactly_one_desktop(bundle):
+def test_at_least_one_desktop(bundle):
+    bundle["frames"][0]["role"] = "mobile"
+    assert any("at least one desktop" in e for e in validate_bundle(bundle))
+
+
+def test_multiple_desktop_pages_allowed(bundle):
     bundle["frames"][1]["role"] = "desktop"
-    assert any("exactly one desktop" in e for e in validate_bundle(bundle))
+    bundle["frames"][1]["page"] = "About"
+    assert validate_bundle(bundle) == []

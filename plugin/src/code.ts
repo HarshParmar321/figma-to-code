@@ -1,8 +1,8 @@
 // Plugin main thread: watches the selection, serializes frames, exports assets, sends all to the UI.
-import { exportImageFills, exportReference, exportSvgs, type ExportedAsset } from './assets.ts';
+import { exportImageFills, exportRasters, exportReference, exportSvgs, type ExportedAsset } from './assets.ts';
 import { newContext, serializeTree } from './serialize.ts';
 import type { Bundle, BundleFrame, FrameRole, MainToUi, SelectedFrame, UiToMain } from './types.ts';
-import { suggestRole, validateRoles } from './util.ts';
+import { pageName, suggestRole, validateRoles } from './util.ts';
 import { collectVariables } from './variables.ts';
 
 const PLUGIN_VERSION = '0.1.0';
@@ -24,7 +24,7 @@ function sendSelection() {
       ignored.push(`${node.name} (${node.type})`);
     }
   }
-  frames.sort((a, b) => b.width - a.width);
+  frames.sort((a, b) => (a.suggestedRole === b.suggestedRole ? a.name.localeCompare(b.name) : b.width - a.width));
   post({ type: 'selection', frames, ignored });
 }
 
@@ -54,7 +54,7 @@ async function runExport(roles: Record<string, FrameRole>) {
     const refs = await exportReference(frame, role, ctx.diagnostics);
     assets.push(...refs);
     frames.push({
-      role, rootId: frame.id, name: frame.name, width: frame.width, height: frame.height,
+      role, rootId: frame.id, name: frame.name, page: pageName(frame.name), width: frame.width, height: frame.height,
       referenceAssets: refs.map((r) => r.meta.id),
     });
   }
@@ -62,8 +62,12 @@ async function runExport(roles: Record<string, FrameRole>) {
   post({ type: 'progress', message: `Exporting ${ctx.imageHashes.size} images…` });
   assets.push(...(await exportImageFills(ctx.imageHashes, ctx.diagnostics)));
 
-  post({ type: 'progress', message: `Exporting ${ctx.svgNodeIds.length} vector assets…` });
+  post({ type: 'progress', message: `Exporting ${ctx.svgNodeIds.length} vector graphics…` });
   assets.push(...(await exportSvgs(ctx.svgNodeIds, ctx.diagnostics)));
+  if (ctx.rasterNodeIds.length) {
+    post({ type: 'progress', message: `Exporting ${ctx.rasterNodeIds.length} detailed illustrations…` });
+    assets.push(...(await exportRasters(ctx.rasterNodeIds, ctx.diagnostics)));
+  }
 
   post({ type: 'progress', message: 'Collecting variables…' });
   const { variables, variableCollections } = await collectVariables(ctx.nodes, ctx.diagnostics);

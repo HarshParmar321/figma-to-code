@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   assetIdFor, collectVariableAliasIds, detectImageFormat, isIconCandidate, suggestRole, validateRoles,
+  vectorGroupExport, RASTER_THRESHOLD, pageName,
 } from '../src/util.ts';
 
 test('suggestRole by frame width', () => {
@@ -43,10 +44,27 @@ test('isIconCandidate', () => {
   assert.equal(isIconCandidate({ ...base, type: 'TEXT' }), false, 'not a container');
 });
 
-test('validateRoles', () => {
+test('validateRoles allows several pages', () => {
   assert.equal(validateRoles({}), 'Select at least one frame.');
-  assert.equal(validateRoles({ a: 'mobile' }), 'Assign exactly one frame as Desktop.');
-  assert.equal(validateRoles({ a: 'desktop', b: 'desktop' }), 'Assign exactly one frame as Desktop.');
-  assert.equal(validateRoles({ a: 'desktop', b: 'mobile', c: 'mobile' }), 'Assign at most one frame as Mobile.');
+  assert.match(validateRoles({ a: 'mobile' }) ?? '', /at least one frame as Desktop/);
+  assert.equal(validateRoles({ a: 'desktop', b: 'desktop' }), null, 'two pages');
   assert.equal(validateRoles({ a: 'desktop', b: 'mobile' }), null);
+});
+
+test('pageName strips breakpoints and devices', () => {
+  assert.equal(pageName('Home / Desktop'), 'Home');
+  assert.equal(pageName('Home - Mobile'), 'Home');
+  assert.equal(pageName('About Us (1440)'), 'About Us');
+  assert.equal(pageName('Contact – iPhone 14 Pro'), 'Contact');
+  assert.equal(pageName('Peachy Pup Bakery'), 'Peachy Pup Bakery');
+});
+
+test('vectorGroupExport collapses illustrations of any size', () => {
+  assert.equal(vectorGroupExport('GROUP', ['VECTOR', 'VECTOR', 'GROUP', 'ELLIPSE'], false), 'svg');
+  assert.equal(vectorGroupExport('FRAME', ['VECTOR', 'TEXT'], false), null, 'text is real content');
+  assert.equal(vectorGroupExport('GROUP', ['RECTANGLE', 'RECTANGLE'], false), null, 'no true vector: keep as shapes');
+  assert.equal(vectorGroupExport('GROUP', ['VECTOR'], true), null, 'image fill');
+  assert.equal(vectorGroupExport('TEXT', ['VECTOR'], false), null, 'not a container');
+  const many = Array(RASTER_THRESHOLD + 1).fill('VECTOR');
+  assert.equal(vectorGroupExport('GROUP', many, false), 'png', 'very complex illustration → PNG');
 });

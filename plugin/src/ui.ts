@@ -1,5 +1,6 @@
 // Plugin UI: one-click Convert (read → upload → generate + verify), results, and advanced tools.
 import type { Bundle, FrameRole, MainToUi, SelectedFrame, UiToMain } from './types.ts';
+import { pageName } from './util.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const framesEl = $('frames');
@@ -72,7 +73,7 @@ function renderFrames(ignored: string[]) {
       if (!roles[f.id]) roles[f.id] = f.suggestedRole;
       const row = document.createElement('div');
       row.className = 'frame';
-      row.innerHTML = `<span class="name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+      row.innerHTML = `<span class="name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}<br><span class="page">Page: ${escapeHtml(pageName(f.name))}</span></span>
         <span class="size">${Math.round(f.width)}×${Math.round(f.height)}</span>`;
       const select = document.createElement('select');
       for (const r of ['desktop', 'tablet', 'mobile', 'skip']) {
@@ -140,8 +141,16 @@ async function loadDesignCheck(bundleId: string) {
   if (rep.ok) renderDesignCheck(await rep.json());
 }
 
+interface PageResult {
+  name: string;
+  file: string;
+  fidelity?: { score: number; band: string; corrections: number; firstScore: number };
+}
+
 interface Conversion {
   bundleId: string;
+  pages: PageResult[];
+  components: string[];
   seconds: number;
   previewUrl: string;
   reportUrl: string;
@@ -156,13 +165,31 @@ interface Conversion {
     sections: { section: string; ssim: number }[];
     topIssues: { severity: string; category: string; name: string | null; message: string; id: string | null }[];
     missingFonts?: string[];
+    firstScore?: number;
+    corrections?: number;
+    pages?: number;
   };
 }
 
 async function generate(bundleId: string): Promise<Conversion> {
-  const res = await fetch(`${engineBase()}/v1/bundles/${bundleId}/convert`, { method: 'POST' });
-  if (!res.ok) throw new Error(`Conversion failed (${res.status}): ${await res.text()}`);
-  return (await res.json()) as Conversion;
+  const base = engineBase();
+  const start = await fetch(`${base}/v1/bundles/${bundleId}/convert`, { method: 'POST' });
+  if (!start.ok && start.status !== 202) throw new Error(`Conversion failed (${start.status}): ${await start.text()}`);
+  // The Engine converts in the background; poll its progress instead of holding one long request.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    let res: Response;
+    try {
+      res = await fetch(`${base}/v1/bundles/${bundleId}/convert/status`);
+    } catch {
+      continue; // transient network hiccup: keep polling
+    }
+    if (!res.ok) throw new Error(`Status check failed (${res.status})`);
+    const job = (await res.json()) as { status: string; stage?: string; elapsed?: number; error?: string; result?: Conversion };
+    if (job.status === 'done' && job.result) return job.result;
+    if (job.status === 'failed') throw new Error(`Conversion failed: ${job.error ?? 'unknown error'}`);
+    setStatus(`${job.stage ?? 'Working'}… ${job.elapsed ? `${Math.round(job.elapsed)} s` : ''}`);
+  }
 }
 
 // ------------------------------------------------------------------ rendering
@@ -176,12 +203,17 @@ function renderResult(r: Conversion) {
   const scoreHtml = f
     ? `<div class="score"><b class="${band}">${f.score.toFixed(1)}</b><span class="band ${band}">${escapeHtml(f.band)}</span></div>
        <div class="note">${f.counts.geometryPass}/${f.counts.elements} elements in place · ${f.counts.critical} critical, ${f.counts.major} major, ${f.counts.minor} minor issues · ${r.seconds.toFixed(1)} s</div>
+       ${f.corrections ? `<div class="note">Self-corrected ${f.corrections} elements (score before corrections: ${f.firstScore?.toFixed(1)})</div>` : ''}
        <table>${Object.entries(f.subScores).filter(([k]) => k !== 'M').map(([k, v]) => `<tr><td>${LABELS[k] ?? k}</td><td class="v">${Math.round(v)}</td></tr>`).join('')}</table>`
     : `<div class="score"><b>✓</b><span class="band">Code generated</span></div><div class="note">The design check was skipped.</div>`;
   const issues = f && f.topIssues.length
     ? `<h2>Top issues</h2>${f.topIssues.slice(0, 5).map((i, idx) => `<div class="finding ${i.severity}" data-idx="${idx}"><strong>${escapeHtml(i.name ?? i.category)}</strong> ${escapeHtml(i.message)}</div>`).join('')}`
     : '';
   const notes = [...r.assumptions, ...r.warnings].map((n) => `<div class="note">• ${escapeHtml(n)}</div>`).join('');
+  const pagesHtml = r.pages && r.pages.length > 1
+    ? `<h2>Pages</h2><table>${r.pages.map((p, i) => `<tr><td><a href="#" data-page="${i}">${escapeHtml(p.name)}</a></td><td class="v">${p.fidelity ? p.fidelity.score.toFixed(1) : '–'}</td></tr>`).join('')}</table>
+       <div class="note">Shared components: ${r.components.length ? r.components.map(escapeHtml).join(', ') : 'none found'}</div>`
+    : r.components && r.components.length ? `<div class="note">Shared components: ${r.components.map(escapeHtml).join(', ')}</div>` : '';
   const missing = f?.missingFonts ?? [];
   const fontsHtml = missing.length
     ? `<div class="fonts"><h2>Missing fonts</h2>
@@ -193,7 +225,14 @@ function renderResult(r: Conversion) {
     : '';
   resultEl.innerHTML = `<div class="result">${scoreHtml}
     <div class="row"><button id="open-preview">Open preview</button><button id="open-report" class="secondary">Report</button><button id="get-code" class="secondary">Download code</button></div>
-    ${fontsHtml}${notes}${issues}</div>`;
+    ${pagesHtml}${fontsHtml}${notes}${issues}</div>`;
+  resultEl.querySelectorAll<HTMLElement>('a[data-page]').forEach((a) => {
+    a.onclick = (ev) => {
+      ev.preventDefault();
+      const page = r.pages[Number(a.dataset.page)];
+      send({ type: 'open-url', url: r.previewUrl.replace(/index\.html$/, page.file) });
+    };
+  });
   if (missing.length) $('fonts-reconvert').onclick = () => run(() => uploadFontsAndReconvert(r.bundleId));
   $('open-preview').onclick = () => send({ type: 'open-url', url: r.previewUrl });
   $('open-report').onclick = () => send({ type: 'open-url', url: r.reportUrl });

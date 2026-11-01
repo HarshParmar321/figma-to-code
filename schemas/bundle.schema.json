@@ -73,6 +73,7 @@
         "role": { "enum": ["desktop", "tablet", "mobile"] },
         "rootId": { "type": "string" },
         "name": { "type": "string" },
+        "page": { "type": "string", "description": "Site page this frame belongs to (frames with the same page are breakpoints of one page)." },
         "width": { "type": "number", "exclusiveMinimum": 0 },
         "height": { "type": "number", "exclusiveMinimum": 0 },
         "referenceAssets": {

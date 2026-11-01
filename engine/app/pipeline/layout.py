@@ -71,9 +71,11 @@ def split_layers(items: list[El]) -> tuple[list[El], list[El]]:
         # SVGs are never containers, so any overlap with later elements makes them a layer.
         # Shapes/images that fully contain later elements were already turned into boxes.
         behind = [
-            o for o in items if o is not e and o.z > e.z and e.intersects(o) and (e.kind == "svg" or not e.contains(o))
+            o
+            for o in items
+            if o is not e and o.z > e.z and e.intersects(o) and (e.kind in ("svg", "raster") or not e.contains(o))
         ]
-        if e.kind in ("svg", "shape", "image") and behind:
+        if e.kind in ("svg", "raster", "shape", "image") and behind:
             layers.append(e)
         else:
             flow.append(e)
@@ -126,13 +128,17 @@ def xy_cut(items: list[El]) -> tuple[str, list[El]]:
         axis, parts, max_gap = "y", ys, max_y
     else:
         axis, parts, max_gap = "x", xs, max_x
-    threshold = max_gap * SPLIT_RATIO
+    # Split at gaps of at least half the largest gap. The largest gap itself always splits, so every
+    # call makes progress (touching items with a zero or negative largest gap used to recurse forever).
+    threshold = max_gap * SPLIT_RATIO if max_gap > 0 else max_gap
     merged: list[list[El]] = []
     for group, gap in parts:
-        if merged and gap < threshold:
+        if merged and gap < threshold and gap < max_gap:
             merged[-1].extend(group)
         else:
             merged.append(list(group))
+    if len(merged) == 1:
+        return "absolute", items
     mode = "column" if axis == "y" else "row"
     children = []
     for group in merged:

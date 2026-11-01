@@ -8,6 +8,7 @@ import json
 import math
 import re
 import shutil
+import textwrap
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,10 +66,12 @@ class Output:
     expectations: list[dict] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    pages: list[dict] = field(default_factory=list)
+    components: list[str] = field(default_factory=list)
 
 
 class Generator:
-    def __init__(self, page: Page, bundle: dict, asset_dir: Path, font_dir: Path | None = None):
+    def __init__(self, page: Page | None, bundle: dict, asset_dir: Path, font_dir: Path | None = None):
         self.page = page
         self.bundle = bundle
         self.asset_dir = asset_dir
@@ -80,8 +83,16 @@ class Generator:
         self.image_uses: dict[str, tuple[float, float]] = {}
         self.expect: list[dict] = []
         self.assumptions: list[str] = []
-        self.warnings: list[str] = list(page.warnings)
+        self.warnings: list[str] = list(page.warnings) if page else []
         self.section_slug = "page"
+        self._anc: list[str] = []  # figma ids of measurable ancestors while rendering
+        self.asset_hashes: dict[str, str] = {}
+        self._by_hash: dict[str, str] = {}
+        self.components: dict[str, str] = {}  # component name -> rendered HTML (first occurrence)
+
+    def _expect(self, item: dict) -> None:
+        item["parent"] = self._anc[-1] if self._anc else None
+        self.expect.append(item)
 
     # ------------------------------------------------------------------ roles
     def assign_roles(self) -> None:
@@ -113,7 +124,9 @@ class Generator:
                 sec.role = "footer"
             else:
                 sec.role = f"section-{i + 1}"
-            sec.tag = "footer" if sec.role == "footer" else "section"
+            if sec.component:
+                sec.role = sec.component
+            sec.tag = sec.tag or ("footer" if sec.role in ("footer", "site-footer") else "section")
             for e in sec.walk():
                 if e.kind == "box" and self._is_button(e):
                     e.role, e.tag = "button", "a"
@@ -216,7 +229,15 @@ class Generator:
         d.update(radius(back))
         return {"::before": d}
 
+    def canonical(self, asset_id: str) -> str:
+        """Identical files (same bytes) share one asset: the first id seen with that hash."""
+        digest = self.asset_hashes.get(asset_id)
+        if not digest:
+            return asset_id
+        return self._by_hash.setdefault(digest, asset_id)
+
     def image_file(self, asset_id: str, w: float, h: float) -> str:
+        asset_id = self.canonical(asset_id)
         pw, ph = self.image_uses.get(asset_id, (0, 0))
         self.image_uses[asset_id] = (max(pw, w), max(ph, h))
         meta = self.asset_meta.get(asset_id, {})
@@ -293,7 +314,7 @@ class Generator:
         tag = e.tag or "div"
         role = e.role or e.kind
 
-        if e.node is not None and e.kind not in ("wrapper", "container"):
+        if e.node is not None and e.kind not in ("wrapper", "container", "section"):
             attrs.append(f'data-figma-id="{html.escape(e.node["id"])}"')
 
         if e.kind == "text":
@@ -325,14 +346,14 @@ class Generator:
             if fills:
                 main["background-color"] = background([{**fills[-1], "opacity": 1}]).get("background-color", "#ffffff")
             attrs.append('aria-hidden="true"')
-            self.expect.append({"id": e.node["id"], "kind": "svg", "box": [bx, by, bw, bh], "asset": f})
-        elif e.kind in ("image", "svg"):
+            self._expect({"id": e.node["id"], "kind": "svg", "box": [bx, by, bw, bh], "asset": f})
+        elif e.kind in ("image", "svg", "raster"):
             tag = "img"
             icon = e.kind == "svg" and max(e.w, e.h) <= ICON_MAX
-            role = "icon" if icon else ("graphic" if e.kind == "svg" else "image")
+            role = "icon" if icon else {"svg": "graphic", "raster": "illustration"}.get(e.kind, "image")
             f = self.image_file(e.asset, e.w, e.h)
             bx, by, bw, bh = self._draw_box(e)
-            alt = "" if e.kind == "svg" else html.escape(e.name)
+            alt = "" if e.kind in ("svg", "raster") else html.escape(e.name)
             attrs += [f'src="images/{f}"', f'alt="{alt}"', f'width="{round(bw)}"', f'height="{round(bh)}"']
             if e.y > 900:
                 attrs.append('loading="lazy"')
@@ -344,7 +365,7 @@ class Generator:
                 )
                 main["object-fit"] = {"FIT": "contain", "TILE": "none"}.get(mode, "cover")
             main.update(self.visual(e))
-            self.expect.append({"id": e.node["id"], "kind": e.kind, "box": [bx, by, bw, bh], "asset": f})
+            self._expect({"id": e.node["id"], "kind": e.kind, "box": [bx, by, bw, bh], "asset": f})
         elif e.kind == "shape":
             main.update({"width": px(e.w), "height": px(e.h), "flex-shrink": "0"})
             main.update(self.visual(e))
@@ -359,7 +380,14 @@ class Generator:
                 # No clipping: like Figma, layers may extend past the section and later sections paint over them.
                 main.update({"position": "relative", "min-height": px(e.h)})
                 main.update(self.visual(e))
+                if e.overlay:
+                    main["z-index"] = "2"
                 attrs.append(f'data-section="{html.escape(e.role or "")}"')
+                sec_id = f"section:{self.page.frame.get('rootId', 'page')}:{e.id}"
+                attrs.append(f'data-figma-id="{html.escape(sec_id)}"')
+                self._expect({"id": sec_id, "kind": "section", "box": [e.x, e.y, e.w, e.h]})
+                if e.component:
+                    attrs.append(f'data-component="{html.escape(e.component)}"')
             elif e.kind == "container":
                 role = "container"
                 left, right = e.x - 0, self.page.width - e.right
@@ -384,13 +412,13 @@ class Generator:
                     role = "layer-group"
 
             children = e.children
-            if e.kind == "section":
-                pad = (children[0].y - e.y, 0, e.bottom - children[0].bottom, 0) if children else (0, 0, 0, 0)
+            if e.kind == "section" and len(children) == 1 and children[0].kind == "container":
+                # Band section: one centred container carries the content; the section only pads it.
+                pad = (children[0].y - e.y, 0, e.bottom - children[0].bottom, 0)
                 pad = tuple(max(0.0, p) for p in pad)
                 flow, per_child = {"display": "flex", "flex-direction": "column"}, [{} for _ in children]
-                if children:
-                    main["padding"] = f"{px(pad[0])} 0 {px(pad[2])}"
-            else:
+                main["padding"] = f"{px(pad[0])} 0 {px(pad[2])}"
+            else:  # boxes, wrappers and frame sections (Auto Layout or not) lay out their children directly
                 pad = self.padding(e, children)
                 if any(pad):
                     main["padding"] = " ".join(px(p) for p in pad)
@@ -401,6 +429,9 @@ class Generator:
                 attrs.append('data-layout="row"')
 
             parts = []
+            measurable = (e.kind == "box" and e.node is not None) or e.kind == "section"
+            if measurable:
+                self._anc.append(self.expect[-1]["id"] if e.kind == "section" else e.node["id"])
             if e.layers:
                 main["position"] = main.get("position", "relative")
                 if main["position"] == "static":
@@ -418,6 +449,8 @@ class Generator:
                     cd["z-index"] = "1"
             for c, cd in zip(children, per_child, strict=True):
                 parts.append(self.render(c, cd, depth + 1))
+            if measurable:
+                self._anc.pop()
             inner = "\n" + "\n".join(parts) + "\n" + ind
 
         main.update(placement)
@@ -481,7 +514,7 @@ class Generator:
         base_seg = max(segs, key=lambda s: len(s.get("characters", "")))
         st = text_style(base_seg, n)
         lh = line_height_px({**n, **{k: v for k, v in base_seg.items() if k == "lineHeight"}})
-        self.expect.append(
+        self._expect(
             {
                 "id": n["id"],
                 "kind": "text",
@@ -494,7 +527,7 @@ class Generator:
 
     def expect_box(self, e: El) -> None:
         bg = background((e.node or {}).get("fills"))
-        self.expect.append(
+        self._expect(
             {
                 "id": e.node["id"],
                 "kind": e.kind,
@@ -619,18 +652,43 @@ class Generator:
         return root, text
 
     # ------------------------------------------------------------------ main
-    def run(self, out_dir: Path) -> Output:
+    def add_page(self, page: Page, filename: str) -> dict:
+        """Renders one page into the shared class registry. Call finish() after the last page."""
+        self.page = page
+        self.expect = []
+        self.warnings.extend(w for w in page.warnings if w not in self.warnings)
         self.assign_roles()
         body_parts = []
-        for sec in self.page.sections:
+        prev_bottom = 0.0
+        for sec in page.sections:
             self.section_slug = sec.role or "section"
-            body_parts.append(self.render(sec, {}, 2))
+            # Sections stack in normal flow: keep any gap (or overlap) the design has between them.
+            gap = sec.y - prev_bottom
+            placement = {"margin-top": px(gap)} if abs(gap) > 0.5 else {}
+            prev_bottom = sec.bottom
+            html_part = self.render(sec, placement, 2)
+            if sec.component and sec.component not in self.components:
+                self.components[sec.component] = html_part
+            body_parts.append(html_part)
+        return {
+            "name": page.name,
+            "file": filename,
+            "frame": page.frame,
+            "title": page.root.name,
+            "body": "\n".join(body_parts),
+            "expectations": self.expect,
+            "width": page.width,
+            "height": page.height,
+            "background": background(page.background).get("background-color", "#ffffff"),
+        }
+
+    def finish(self, out_dir: Path, pages: list[dict]) -> Output:
         root_css, rules_css = self.css_text()
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "css").mkdir(exist_ok=True)
         images = self.write_images(out_dir)
         fonts, faces, google_href = self.write_fonts(out_dir)
-        page_bg = background(self.page.background).get("background-color", "#ffffff")
+        page_bg = pages[0]["background"] if pages else "#ffffff"
         base = (
             "*, *::before, *::after { box-sizing: border-box; }\n"
             f"html, body {{ margin: 0; padding: 0; background: {page_bg}; }}\n"
@@ -651,19 +709,41 @@ class Generator:
         if not any(f["role"] == "mobile" for f in self.bundle["frames"]):
             self.assumptions.append("No mobile frame: a simple stacked mobile layout was inferred below 768px.")
         css = "\n\n".join(p for p in [faces, root_css, base, rules_css, responsive] if p) + "\n"
-        title = html.escape(self.bundle["source"].get("fileName", "Page"))
+        site = html.escape(self.bundle["source"].get("fileName", "Site"))
         font_link = f'  <link rel="stylesheet" href="{html.escape(google_href)}">\n' if google_href else ""
-        doc = (
-            '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n'
-            '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
-            f"  <title>{title} · {html.escape(self.page.root.name)}</title>\n{font_link}"
-            '  <link rel="stylesheet" href="css/styles.css">\n</head>\n<body>\n  <main>\n'
-            + "\n".join(body_parts)
-            + "\n  </main>\n</body>\n</html>\n"
-        )
-        (out_dir / "index.html").write_text(doc, encoding="utf-8")
+        corrections = out_dir / "css" / "corrections.css"
+        if not corrections.exists():
+            corrections.write_text("/* Fidelity corrections are written here after measuring the page. */\n")
+        docs = []
+        for p in pages:
+            bg = f' style="background: {p["background"]}"' if p["background"] != page_bg else ""
+            doc = (
+                '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n'
+                '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+                f"  <title>{html.escape(p['name'])} · {site}</title>\n{font_link}"
+                '  <link rel="stylesheet" href="css/styles.css">\n'
+                '  <link rel="stylesheet" href="css/corrections.css">\n'
+                f"</head>\n<body{bg}>\n  <main>\n{p['body']}\n  </main>\n</body>\n</html>\n"
+            )
+            (out_dir / p["file"]).write_text(doc, encoding="utf-8")
+            docs.append(doc)
+        if self.components:
+            comp_dir = out_dir / "components"
+            comp_dir.mkdir(exist_ok=True)
+            for name, fragment in self.components.items():
+                (comp_dir / f"{name}.html").write_text(textwrap.dedent(fragment).strip() + "\n", encoding="utf-8")
         (out_dir / "css" / "styles.css").write_text(css, encoding="utf-8")
-        return Output(doc, css, images, fonts, self.expect, self.assumptions, self.warnings)
+        out = Output(docs[0] if docs else "", css, images, fonts, [], self.assumptions, self.warnings)
+        out.pages = pages
+        out.components = sorted(self.components)
+        return out
+
+    def run(self, out_dir: Path) -> Output:
+        """Single page (kept for callers that convert one frame)."""
+        result = self.add_page(self.page, "index.html")
+        out = self.finish(out_dir, [result])
+        out.expectations = result["expectations"]
+        return out
 
 
 def generate(page: Page, bundle: dict, asset_dir: Path, out_dir: Path, font_dir: Path | None = None) -> Output:
@@ -677,4 +757,30 @@ def generate(page: Page, bundle: dict, asset_dir: Path, out_dir: Path, font_dir:
         "warnings": out.warnings,
     }
     (out_dir.parent / "generation.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return out
+
+
+def generate_site(
+    pages: list[tuple[Page, str]],
+    bundle: dict,
+    asset_dir: Path,
+    out_dir: Path,
+    font_dir: Path | None = None,
+    asset_hashes: dict[str, str] | None = None,
+) -> Output:
+    """Several pages sharing one stylesheet, images, fonts and component classes."""
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    gen = Generator(None, bundle, asset_dir, font_dir)
+    gen.asset_hashes = asset_hashes or {}
+    results = [gen.add_page(page, filename) for page, filename in pages]
+    out = gen.finish(out_dir, results)
+    meta = {
+        "pages": [{k: v for k, v in r.items() if k not in ("body",)} for r in results],
+        "components": out.components,
+        "fonts": out.fonts,
+        "assumptions": out.assumptions,
+        "warnings": out.warnings,
+    }
+    (out_dir.parent / "generation.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     return out

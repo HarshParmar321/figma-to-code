@@ -3,12 +3,13 @@
 import json
 import re
 import threading
+import time
 from collections import defaultdict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import __version__
@@ -20,6 +21,7 @@ from .spike_report import build_report
 from .storage import BundleStore, NotFound
 
 _convert_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+_jobs: dict[str, dict] = {}  # bundle id -> conversion job state (in memory; one job per bundle)
 
 app = FastAPI(title="Figma-to-Code Engine", version=__version__)
 app.add_middleware(
@@ -166,18 +168,16 @@ def _links(bundle_id: str) -> dict:
     }
 
 
-@app.post("/v1/bundles/{bundle_id}/convert")
-def convert_bundle(bundle_id: str, verify: bool = True) -> dict:
-    """Runs the whole pipeline: Design IR → layout → HTML/CSS → render and score. Takes a few seconds."""
-    try:
-        bundle = store.load(bundle_id)
-        meta = store.load_meta(bundle_id)
-        bdir = store.bundle_dir(bundle_id)
-    except NotFound as e:
-        raise HTTPException(404, "Bundle not found") from e
-    missing = [a["id"] for a in bundle["assets"] if a["id"] not in meta["assets"]]
-    if missing:
-        raise HTTPException(409, {"message": "Upload all assets before converting", "missingAssets": missing})
+def _run_conversion(bundle_id: str, verify: bool) -> dict:
+    bundle = store.load(bundle_id)
+    meta = store.load_meta(bundle_id)
+    bdir = store.bundle_dir(bundle_id)
+    job = _jobs[bundle_id]
+
+    def progress(stage: str) -> None:
+        job["stage"] = stage
+        job["updatedAt"] = time.time()
+
     with _convert_locks[bundle_id]:
         result = convert(
             bundle,
@@ -185,8 +185,71 @@ def convert_bundle(bundle_id: str, verify: bool = True) -> dict:
             font_dir=settings.font_dir,
             chromium_path=settings.chromium_path,
             run_verify=verify,
+            asset_hashes={aid: a.get("sha256", "") for aid, a in meta["assets"].items()},
+            progress=progress,
         )
     return {"bundleId": bundle_id, **result, **_links(bundle_id)}
+
+
+def _job_thread(bundle_id: str, verify: bool) -> None:
+    job = _jobs[bundle_id]
+    try:
+        job["result"] = _run_conversion(bundle_id, verify)
+        job["status"] = "done"
+    except Exception as e:  # surfaced to the plugin instead of a dropped connection
+        job["status"] = "failed"
+        job["error"] = f"{type(e).__name__}: {str(e).splitlines()[0][:500] if str(e) else ''}"
+    job["finishedAt"] = time.time()
+
+
+@app.post("/v1/bundles/{bundle_id}/convert")
+def convert_bundle(bundle_id: str, verify: bool = True, wait: bool = False):
+    """Generates HTML/CSS for every page, then measures, self-corrects and scores it.
+
+    By default this starts a background job and returns at once (202); poll
+    `GET /v1/bundles/{id}/convert/status`. `?wait=true` runs it inline and returns the result.
+    """
+    try:
+        bundle = store.load(bundle_id)
+        meta = store.load_meta(bundle_id)
+    except NotFound as e:
+        raise HTTPException(404, "Bundle not found") from e
+    missing = [a["id"] for a in bundle["assets"] if a["id"] not in meta["assets"]]
+    if missing:
+        raise HTTPException(409, {"message": "Upload all assets before converting", "missingAssets": missing})
+    current = _jobs.get(bundle_id)
+    if current and current["status"] == "running":
+        return JSONResponse(_public_job(bundle_id), status_code=202)
+    _jobs[bundle_id] = {"status": "running", "stage": "Starting", "startedAt": time.time(), "error": None}
+    if wait:
+        _job_thread(bundle_id, verify)
+        job = _jobs[bundle_id]
+        if job["status"] == "failed":
+            raise HTTPException(500, job["error"])
+        return job["result"]
+    threading.Thread(target=_job_thread, args=(bundle_id, verify), daemon=True).start()
+    return JSONResponse(_public_job(bundle_id), status_code=202)
+
+
+def _public_job(bundle_id: str) -> dict:
+    job = _jobs.get(bundle_id)
+    if not job:
+        return {"bundleId": bundle_id, "status": "idle"}
+    out = {k: v for k, v in job.items() if k != "result"}
+    out["bundleId"] = bundle_id
+    out["elapsed"] = round((job.get("finishedAt") or time.time()) - job["startedAt"], 1)
+    if job["status"] == "done":
+        out["result"] = job["result"]
+    return out
+
+
+@app.get("/v1/bundles/{bundle_id}/convert/status")
+def convert_status(bundle_id: str) -> dict:
+    try:
+        store.bundle_dir(bundle_id)
+    except NotFound as e:
+        raise HTTPException(404, "Bundle not found") from e
+    return _public_job(bundle_id)
 
 
 @app.get("/v1/bundles/{bundle_id}/conversion")

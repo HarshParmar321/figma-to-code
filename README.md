@@ -2,7 +2,7 @@
 
 A Figma plugin plus an Engine that turns a Figma design into verified, responsive HTML/CSS (v1) and later a WordPress theme (v1.5). See the SRS for the full specification.
 
-**Current stage: v0.2, end-to-end pipeline.** In the plugin, click **Convert to code**: the design is read, uploaded, converted to HTML/CSS, rendered in a real browser, compared against the Figma frame and scored. You get a live preview, a fidelity report and a downloadable zip.
+**Current stage: v0.3.** In the plugin, select one desktop frame per page and click **Convert to code**. Every page is converted to HTML/CSS, rendered in a real browser, measured against its Figma frame and **automatically corrected** until it matches. Sections that repeat across pages (header, footer…) are generated once as shared components. You get a live preview, a fidelity report and a downloadable zip.
 
 ## Repository layout
 
@@ -35,9 +35,9 @@ Check it: open http://localhost:8000/health. Everything is stored in `engine/dat
 
 | Path | What |
 | --- | --- |
-| `output/` | Generated site: `index.html`, `css/styles.css`, `images/`, `fonts/` |
+| `output/` | Generated site: `index.html` (+ one file per page), `css/styles.css`, `css/corrections.css`, `components/`, `images/`, `fonts/` |
 | `code.zip` | The same site, zipped for download |
-| `fidelity/report.html` | Score, breakdown, side-by-side and difference images, issues |
+| `fidelity/report.html` | Score, breakdown, side-by-side and difference images, issues (multi-page: site summary + one folder per page) |
 | `conversion.json` | Summary of the last conversion |
 
 Without Chromium the code is still generated; the score is skipped and the plugin tells you how to install it.
@@ -52,9 +52,9 @@ npm run build      # or: npm run watch
 
 In the Figma desktop app, open a design file, press **Cmd + /**, run **Import plugin from manifest** and choose `plugin/manifest.json`. Then run **Figma to Code (dev)**.
 
-1. Select a desktop frame (and its mobile frame if you have one). Check the role next to each frame.
-2. Click **Convert to code**. Steps: Read design → Upload → Generate and check.
-3. See the score, then **Open preview**, **Report** or **Download code**.
+1. Select one desktop frame per page (Home, About, Contact…) and their mobile frames if you have them, all on the same Figma page. The plugin shows the page name it will use for each frame ("Home / Desktop" → Home).
+2. Click **Convert to code**. Steps: Read design → Upload → Generate and check (live progress, including correction rounds).
+3. See the score per page and the shared components found, then **Open preview**, **Report** or **Download code**.
 
 The plugin can only reach `http://localhost:8000` during development (see `networkAccess` in the manifest). **Settings and advanced** in the plugin has export-only, upload-only and JSON download.
 
@@ -96,7 +96,8 @@ The full browser test runs only when Chromium is installed; otherwise it is skip
 | PUT | `/v1/bundles/{id}/assets/{assetId}` | Upload one declared asset (raw bytes) |
 | GET | `/v1/bundles/{id}` | Bundle metadata and missing assets |
 | GET | `/v1/bundles/{id}/report` | Design check (JSON) |
-| POST | `/v1/bundles/{id}/convert` | Generate HTML/CSS and score it (`?verify=false` skips the browser check) |
+| POST | `/v1/bundles/{id}/convert` | Start the conversion in the background (202). `?verify=false` skips the browser check, `?wait=true` runs inline |
+| GET | `/v1/bundles/{id}/convert/status` | Job progress: `running` + current step, `done` + result, or `failed` + error |
 | GET | `/v1/bundles/{id}/conversion` | Last conversion result |
 | GET | `/v1/bundles/{id}/output/{path}` | Live preview of the generated site |
 | GET | `/v1/bundles/{id}/fidelity/{path}` | Fidelity report and images |

@@ -24,7 +24,7 @@ FULL_WIDTH_RATIO = 0.95
 class El:
     id: str
     name: str
-    kind: str  # page | section | container | box | wrapper | text | image | svg | shape
+    kind: str  # page | section | container | box | wrapper | text | image | svg | raster | shape
     x: float
     y: float
     w: float
@@ -40,6 +40,8 @@ class El:
     role: str | None = None
     auto: bool = False  # Auto Layout frame: layout comes from Figma, not inference
     bleed: tuple[float, float, float, float] | None = None  # SVG export area beyond the box (t, r, b, l)
+    overlay: bool = False  # section paints above its neighbours' background layers (split-out header)
+    component: str | None = None  # shared component name when the section repeats across pages
 
     @property
     def right(self) -> float:
@@ -79,6 +81,8 @@ class Page:
     height: float
     background: list[dict]
     warnings: list[str] = field(default_factory=list)
+    frame: dict = field(default_factory=dict)
+    name: str = ""  # site page name (e.g. "Home", "About")
 
 
 def _sanitize(s: str) -> str:
@@ -140,12 +144,14 @@ class IRBuilder:
         if not node.get("visible", True) or node.get("opacity", 1) == 0 or node.get("insideSvg"):
             return []
         t = node["type"]
-        if node.get("exportAs") == "svg":
-            asset = f"svg-{_sanitize(node['id'])}"
+        if node.get("exportAs") in ("svg", "png"):
+            fmt = node["exportAs"]
+            asset = f"{fmt}-{_sanitize(node['id'])}"
             if asset in self.asset_ids:
-                e = self.el(node, root, "svg", asset=asset, bleed=self._bleed(node))
+                kind = "svg" if fmt == "svg" else "raster"
+                e = self.el(node, root, kind, asset=asset, bleed=self._bleed(node))
                 return [e] if e else []
-            self.warnings.append(f"SVG asset missing for {node['name']} ({node['id']})")
+            self.warnings.append(f"{fmt.upper()} asset missing for {node['name']} ({node['id']})")
             return []
         if t == "TEXT":
             if not node.get("characters", "").strip():
@@ -223,7 +229,17 @@ class IRBuilder:
         for sec in sections:
             self._pull_backgrounds(sec, W)
         page.children = sections
-        return Page(frame["role"], page, sections, W, H, root.get("fills") or [], self.warnings)
+        return Page(
+            frame["role"],
+            page,
+            sections,
+            W,
+            H,
+            root.get("fills") or [],
+            self.warnings,
+            frame=frame,
+            name=frame.get("page") or page_name(frame["name"]),
+        )
 
     @staticmethod
     def _pull_backgrounds(sec: El, page_width: float) -> None:
@@ -234,11 +250,51 @@ class IRBuilder:
         """
         keep = []
         for e in sec.children:
-            is_bg = e.kind in ("shape", "image", "svg") and e.w >= page_width * FULL_WIDTH_RATIO and e.h >= 24
+            is_bg = e.kind in ("shape", "image", "svg", "raster") and e.w >= page_width * FULL_WIDTH_RATIO and e.h >= 24
             (sec.layers if is_bg else keep).append(e)
         sec.children = keep
 
 
+BREAKPOINT_WORDS = re.compile(
+    r"\b((iphone|ipad|pixel|galaxy|android|macbook)(\s*(\d+\w*|pro|max|mini|plus|air|ultra|se))*|desktop|tablet|mobile|phone|web|pc|\d{3,4}(px)?)\b",
+    re.I,
+)
+
+
+def page_name(frame_name: str) -> str:
+    """Site page name from a frame name: "Home / Desktop" and "Home - Mobile" are both "Home"."""
+    cleaned = BREAKPOINT_WORDS.sub(" ", frame_name)
+    cleaned = re.sub(r"[\s/|_\-–—:()\[\]]+", " ", cleaned).strip()
+    return cleaned or frame_name.strip() or "Page"
+
+
 def build_ir(bundle: dict) -> dict[str, Page]:
+    """First page per breakpoint role (single-page callers)."""
+    out: dict[str, Page] = {}
+    for p in build_pages(bundle):
+        out.setdefault(p.role, p)
+    return out
+
+
+def build_pages(bundle: dict) -> list[Page]:
+    """Every selected frame as a Page, in selection order."""
     builder = IRBuilder(bundle)
-    return {f["role"]: builder.build_page(f) for f in bundle["frames"]}
+    return [builder.build_page(f) for f in bundle["frames"]]
+
+
+def site_pages(pages: list[Page]) -> list[dict]:
+    """Groups frames into site pages: one desktop frame per page, plus its mobile/tablet frames if any."""
+    groups: dict[str, dict] = {}
+    for p in pages:
+        key = p.name.lower()
+        g = groups.setdefault(key, {"name": p.name, "desktop": None, "tablet": None, "mobile": None})
+        if g[p.role] is None:
+            g[p.role] = p
+    result = [g for g in groups.values() if g["desktop"] is not None]
+    # A single desktop with differently named mobile/tablet frames: pair them anyway.
+    if len(result) == 1:
+        for g in groups.values():
+            for role in ("tablet", "mobile"):
+                if g[role] is not None and result[0][role] is None:
+                    result[0][role] = g[role]
+    return result

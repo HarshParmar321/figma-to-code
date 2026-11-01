@@ -61,13 +61,39 @@ export function isIconCandidate(p: IconProbe): boolean {
   return p.descendantTypes.some((t) => VECTOR_TYPES.has(t));
 }
 
+/** Shapes an illustration may be made of (anything else, e.g. TEXT, means it is real content). */
+export const ILLUSTRATION_PART_TYPES = new Set([
+  'VECTOR', 'BOOLEAN_OPERATION', 'STAR', 'POLYGON', 'ELLIPSE', 'RECTANGLE', 'LINE', 'GROUP', 'FRAME', 'INSTANCE', 'COMPONENT',
+]);
+export const ILLUSTRATION_CONTAINERS = new Set(['FRAME', 'GROUP', 'INSTANCE', 'COMPONENT', 'BOOLEAN_OPERATION']);
+/** Above this many vector pieces an illustration is exported as a 2x PNG instead of a huge SVG. */
+export const RASTER_THRESHOLD = 400;
+
+/**
+ * Decides how a container exports: one SVG, one PNG (very complex), or not at all (real content).
+ * A container whose descendants are only shapes, with at least one true vector and no image fill,
+ * is an illustration or icon of any size and must be exported whole, never piece by piece.
+ */
+export function vectorGroupExport(type: string, descendantTypes: string[], hasImage: boolean): 'svg' | 'png' | null {
+  if (!ILLUSTRATION_CONTAINERS.has(type) || hasImage || descendantTypes.length === 0) return null;
+  if (!descendantTypes.every((t) => ILLUSTRATION_PART_TYPES.has(t))) return null;
+  const vectors = descendantTypes.filter((t) => VECTOR_TYPES.has(t)).length;
+  if (vectors === 0) return null;
+  return vectors > RASTER_THRESHOLD ? 'png' : 'svg';
+}
+
 /** Validates the role assignment chosen in the UI. Returns an error message or null. */
 export function validateRoles(roles: Record<string, FrameRole>): string | null {
   const values = Object.values(roles);
   if (values.length === 0) return 'Select at least one frame.';
-  const count = (r: FrameRole) => values.filter((v) => v === r).length;
-  if (count('desktop') !== 1) return 'Assign exactly one frame as Desktop.';
-  if (count('mobile') > 1) return 'Assign at most one frame as Mobile.';
-  if (count('tablet') > 1) return 'Assign at most one frame as Tablet.';
+  if (!values.includes('desktop')) return 'Mark at least one frame as Desktop (each desktop frame becomes a page).';
   return null;
+}
+
+const DEVICE_WORDS = /\b((iphone|ipad|pixel|galaxy|android|macbook)(\s*(\d+\w*|pro|max|mini|plus|air|ultra|se))*|desktop|tablet|mobile|phone|web|pc|\d{3,4}(px)?)\b/gi;
+
+/** Site page name from a frame name: "Home / Desktop" and "Home - Mobile" are both "Home". */
+export function pageName(frameName: string): string {
+  const cleaned = frameName.replace(DEVICE_WORDS, ' ').replace(/[\s/|_\-–—:()[\]]+/g, ' ').trim();
+  return cleaned || frameName.trim() || 'Page';
 }

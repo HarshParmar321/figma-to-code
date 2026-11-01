@@ -45,6 +45,6 @@ def _integrity_errors(bundle: dict) -> list[str]:
     if len(asset_ids) != len(set(asset_ids)):
         out.append("assets: duplicate asset ids")
     roles = [f["role"] for f in bundle["frames"]]
-    if roles.count("desktop") != 1:
-        out.append("frames: exactly one desktop frame is required")
+    if roles.count("desktop") < 1:
+        out.append("frames: at least one desktop frame is required")
     return out

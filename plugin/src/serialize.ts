@@ -1,9 +1,9 @@
 // Serializes a Figma node subtree into the flat bundle node map.
 import type { BundleNode, Diagnostic, FontRef } from './types.ts';
-import { ICON_MAX_SIZE, VECTOR_TYPES, isIconCandidate } from './util.ts';
+import { ILLUSTRATION_PART_TYPES, VECTOR_TYPES, vectorGroupExport } from './util.ts';
 
 export const MAX_NODES = 25000;
-const ICON_CONTAINER_TYPES = new Set(['FRAME', 'GROUP', 'INSTANCE', 'COMPONENT']);
+const CONTAINER_TYPES = new Set(['FRAME', 'GROUP', 'INSTANCE', 'COMPONENT', 'BOOLEAN_OPERATION']);
 const MIXED = 'MIXED';
 
 const COMMON_PROPS = [
@@ -67,9 +67,14 @@ function hasImageFill(node: SceneNode): boolean {
   return Array.isArray(fills) && fills.some((p) => p.type === 'IMAGE' && p.visible !== false);
 }
 
-function descendantTypes(node: SceneNode): string[] {
-  if (!('findAll' in node)) return [];
-  return (node as ChildrenMixin & SceneNode).findAll(() => true).map((n) => n.type);
+/** Export decision for a container (see vectorGroupExport). Cheap early exit when real content is found. */
+function containerExport(node: SceneNode): 'svg' | 'png' | null {
+  if (!CONTAINER_TYPES.has(node.type) || !('findAll' in node)) return null;
+  const parent = node as ChildrenMixin & SceneNode;
+  const offender = parent.findOne((n) => !ILLUSTRATION_PART_TYPES.has(n.type) || hasImageFill(n));
+  if (offender || hasImageFill(node)) return null;
+  const types = parent.findAll((n) => n.visible).map((n) => n.type);
+  return vectorGroupExport(node.type, types, false);
 }
 
 export interface SerializeContext {
@@ -80,6 +85,8 @@ export interface SerializeContext {
   imageHashes: Map<string, string[]>;
   /** node ids to export as one SVG each */
   svgNodeIds: string[];
+  /** very complex illustrations, exported as one 2x PNG each */
+  rasterNodeIds: string[];
   components: Record<string, Record<string, unknown>>;
   count: number;
   truncated: boolean;
@@ -88,7 +95,7 @@ export interface SerializeContext {
 
 export function newContext(onProgress?: (count: number) => void): SerializeContext {
   return {
-    nodes: {}, diagnostics: [], fonts: new Map(), imageHashes: new Map(), svgNodeIds: [],
+    nodes: {}, diagnostics: [], fonts: new Map(), imageHashes: new Map(), svgNodeIds: [], rasterNodeIds: [],
     components: {}, count: 0, truncated: false, onProgress,
   };
 }
@@ -204,17 +211,12 @@ async function serializeNode(node: SceneNode, parentId: string | null, ctx: Seri
         }
       }
     }
-    if (VECTOR_TYPES.has(node.type)) {
-      out.exportAs = 'svg';
-      ctx.svgNodeIds.push(node.id);
-    } else if (
-      // Cheap checks first: findAll only runs on small containers.
-      ICON_CONTAINER_TYPES.has(node.type) && node.width <= ICON_MAX_SIZE && node.height <= ICON_MAX_SIZE &&
-      isIconCandidate({
-        type: node.type, width: node.width, height: node.height,
-        hasImageFill: hasImageFill(node), descendantTypes: descendantTypes(node),
-      })
-    ) {
+    const isRoot = parentId === null;
+    const groupExport = isRoot ? null : containerExport(node);
+    if (groupExport === 'png') {
+      out.exportAs = 'png';
+      ctx.rasterNodeIds.push(node.id);
+    } else if (groupExport === 'svg' || (VECTOR_TYPES.has(node.type) && node.width >= 0.5 && node.height >= 0.5)) {
       out.exportAs = 'svg';
       ctx.svgNodeIds.push(node.id);
     }
@@ -246,7 +248,7 @@ export async function serializeTree(root: SceneNode, ctx: SerializeContext): Pro
       await new Promise((r) => setTimeout(r, 0)); // yield so the UI stays responsive
     }
     if ('children' in node) {
-      const childInsideSvg = insideSvg || out.exportAs === 'svg';
+      const childInsideSvg = insideSvg || out.exportAs === 'svg' || out.exportAs === 'png';
       for (let i = node.children.length - 1; i >= 0; i--) {
         stack.push({ node: node.children[i], parentId: node.id, insideSvg: childInsideSvg });
       }
