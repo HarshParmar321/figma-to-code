@@ -2,7 +2,7 @@
 
 A Figma plugin plus an Engine that turns a Figma design into verified, responsive HTML/CSS (v1) and later a WordPress theme (v1.5). See the SRS for the full specification.
 
-**Current stage: v0.4.** In the plugin, select one desktop frame per page and click **Convert to code**. Every page is converted to HTML/CSS, rendered in a real browser, measured against its Figma frame and **automatically corrected** until it matches. Pages stay centred on any screen width and scale down (never cut off) below the content width; layers stack in exactly Figma's order, masks and cropped images are reproduced, and even a 10,000-layer file converts and checks in about 10 seconds. Sections that repeat across pages (header, footer…) are generated once as shared components. You get a live preview, a fidelity report and a downloadable zip.
+**Current stage: v0.5.** In the plugin, select one desktop frame per page and click **Convert to code**. Every page is converted to HTML/CSS, rendered in a real browser, measured against its Figma frame and **automatically corrected** until it matches. The code is written the way a front-end developer would: one centred container, fluid widths, CSS grid for repeated cards, a shared `.btn` component, design tokens, semantic HTML with a real `<nav>` whose links scroll to the matching sections. Every conversion gets two scores: fidelity (does it match Figma?) and code quality (is it clean and does it hold up on phone, tablet and laptop?). Sections that repeat across pages (header, footer…) are generated once as shared components. You get a live preview, a fidelity report and a downloadable zip.
 
 ## Repository layout
 

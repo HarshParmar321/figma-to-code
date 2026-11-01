@@ -43,6 +43,7 @@ class El:
     overlay: bool = False  # section paints above its neighbours' background layers (split-out header)
     component: str | None = None  # shared component name when the section repeats across pages
     mask: dict | None = None  # Figma mask applied to this element (shape clip or image alpha)
+    html_id: str | None = None  # id attribute (sections: anchor target for nav links)
 
     @property
     def right(self) -> float:
@@ -84,6 +85,7 @@ class Page:
     warnings: list[str] = field(default_factory=list)
     frame: dict = field(default_factory=dict)
     name: str = ""  # site page name (e.g. "Home", "About")
+    container: tuple[float, float] | None = None  # (left, width) of the centred content column
 
 
 def _sanitize(s: str) -> str:

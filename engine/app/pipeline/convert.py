@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import corrections as corr
+from . import quality
 from .components import detect_shared_sections, split_shared_strips
 from .fidelity import Renderer, verify, write_compare_images, write_report_html, write_site_report
 from .generate import generate_site
@@ -142,6 +143,9 @@ def convert(
                                       preview_href=back + file)  # fmt: skip
                     applied = sum(1 for nid in fixes if nid in fid["measurements"])
                     page_results.append((p, file, fid, first_score, rounds, applied, pdir))
+                say("Checking code quality and screen sizes")
+                widths = {f: round(pg.width) for pg, f in zip(pages, files, strict=True)}
+                result["quality"] = quality.analyze(out_dir, files, renderer, widths)
         except Exception as e:  # browser missing or crashed: the code is still generated
             msg = str(e).splitlines()[0][:300]
             result["warnings"].append(f"Design check skipped: {msg}")
@@ -191,6 +195,8 @@ def convert(
         if len(scored) > 1:
             write_site_report(result, fid_dir, bundle["source"].get("fileName", "Design"))
 
+    if "quality" not in result:
+        result["quality"] = quality.analyze(out_dir, files)  # structure only (no browser check ran)
     (bundle_dir / "code.zip").unlink(missing_ok=True)  # zips are built on download now
     result["files"] = sorted(str(p.relative_to(out_dir)) for p in out_dir.rglob("*") if p.is_file())
     result["zip"] = "code.zip"

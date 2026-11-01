@@ -32,9 +32,13 @@ ICON_MAX = 64
 WEBP_QUALITY = 82
 MAX_IMAGE_EDGE = 2560
 PAINT_KINDS = {"text", "image", "svg", "raster", "shape", "box"}
+CTA_WORDS = re.compile(r"\b(contact|help|touch|book|call|quote|talk|hire|start|enquire|inquire|message|demo)\b")
+# Where an element sits (set by its parent), as opposed to how it looks.
+PLACEMENT_KEYS = {"margin-top", "margin-left", "margin-inline", "align-self", "z-index", "position", "top", "left"}
 EDGE_MAX_VIEWPORT = 3840  # edge panels reach the screen edge up to this width
 MOBILE_MAX = 767  # inferred mobile layout below 768px
-FIT_GUTTER = 24.0  # breathing room left and right of the content when the layout starts scaling
+FIT_GUTTER = 24.0  # breathing room left and right of the content when composition sections start scaling
+GUTTER = 24.0  # side padding of the content column on small screens
 FIT_STEP = 32  # zoom steps (px of viewport) between the mobile breakpoint and the content width
 
 
@@ -60,6 +64,21 @@ def _font_weight(e: El) -> int:
 
 def _texts(e: El) -> list[El]:
     return [x for x in e.walk() if x.kind == "text"]
+
+
+def _text(chars: str) -> str:
+    """Escaped text; Figma line breaks become <br> (no white-space: pre needed)."""
+    return "<br>".join(html.escape(part) for part in chars.split("\n"))
+
+
+def _sort_key(v: str) -> float:
+    m = re.match(r"([\d.]+)px", v)
+    return float(m.group(1)) if m else 1e9
+
+
+def _norm(text: str) -> str:
+    """Label comparison key: 'About Us', 'ABOUT US' and 'About us →' all become 'about us'."""
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
 @dataclass
@@ -88,11 +107,24 @@ class Generator:
         self.image_uses: dict[str, dict] = {}  # output stem -> {asset, crop, w, h}
         self.fit_width = 0.0  # narrowest viewport that still shows all content at 100%
         self._stack: set[int] = set()  # elements that need an explicit z-index (paint order)
+        self._bg: set[int] = set()  # background layers: z-index -1 inside their isolated parent
+        self._levels: dict[int, int] = {}  # element id -> smallest z-index keeping Figma's order
+        self._fit_sections = False  # some sections keep a design-width stage (scaled on narrow screens)
+        self._anchors: dict[str, str] = {}  # normalised label -> section id, for nav links and buttons
+        self._alt_context: dict[int, str] = {}  # image id -> heading text of its card/section
+        self._component: list[str] = []  # global component being rendered (its parts get btn__* classes)
+        self.grid_columns: set[int] = set()
+        self.page_links: dict[str, str] = {}  # normalised page name -> file (multi-page navigation)
+        self.body_style: dict[str, str] | None = None  # base text style, written once on <body>
+        self.container_width = 0.0
+        self.design_width = 0.0
         self.expect: list[dict] = []
         self.assumptions: list[str] = []
         self.warnings: list[str] = list(page.warnings) if page else []
         self.section_slug = "page"
         self._anc: list[str] = []  # figma ids of measurable ancestors while rendering
+        self._ctx: list[str] = ["absolute"]  # how the current parent lays out its children
+        self._parent_span: list[tuple[float, float] | None] = []  # parent content box (x0, x1) per level
         self.asset_hashes: dict[str, str] = {}
         self._by_hash: dict[str, str] = {}
         self.components: dict[str, str] = {}  # component name -> rendered HTML (first occurrence)
@@ -191,11 +223,21 @@ class Generator:
         return 0 < len(words) <= BUTTON_MAX_WORDS and not others
 
     # ------------------------------------------------------------------ classes
-    def class_for(self, role: str, css: dict[str, dict[str, str]]) -> str:
-        sig = (self.section_slug, role, tuple(sorted((k, tuple(sorted(v.items()))) for k, v in css.items())))
+    def class_for(self, role: str, css: dict[str, dict[str, str]], component: str | None = None) -> str:
+        """Class for a set of declarations. Identical declarations share a class.
+
+        Section parts are named block__element (hero__title). Components (buttons) are global: .btn,
+        .btn__label, shared by every section and page.
+        """
+        comp = component or (self._component[-1] if self._component else None)
+        scope = f"@{comp}" if comp else self.section_slug
+        sig = (scope, role, tuple(sorted((k, tuple(sorted(v.items()))) for k, v in css.items())))
         if sig in self._class_by_sig:
             return self._class_by_sig[sig]
-        base = f"{self.section_slug}__{role}" if role != self.section_slug else role
+        if comp:
+            base = comp if role == comp else f"{comp}__{role}"
+        else:
+            base = f"{self.section_slug}__{role}" if role != self.section_slug else role
         self._class_count[base] += 1
         name = base if self._class_count[base] == 1 else f"{base}--{self._class_count[base]}"
         self._class_by_sig[sig] = name
@@ -285,18 +327,27 @@ class Generator:
     def flow_css(
         self, parent: El, children: list[El], pad: tuple[float, float, float, float]
     ) -> tuple[dict, list[dict]]:
-        """CSS for a flex/absolute parent and the per-child placement declarations."""
+        """CSS for a flex/grid/absolute parent and the per-child placement declarations.
+
+        The returned dict carries "__ctx__" (column, row, grid or absolute): how children are sized.
+        """
         mode = parent.layout.get("mode", "column")
         pt, pr, pb, pl = pad
         per_child: list[dict] = [{} for _ in children]
         if mode == "absolute":
-            d = {"position": "relative", "width": px(parent.w), "height": px(parent.h)}
+            d = {"position": "relative", "width": px(parent.w), "height": px(parent.h), "__ctx__": "absolute"}
+            if parent.kind == "wrapper" and self._ctx[-1] != "absolute":
+                d["max-width"] = "100%"
             for c, cd in zip(children, per_child, strict=True):
                 cd.update({"position": "absolute", "left": px(c.x - parent.x), "top": px(c.y - parent.y)})
             return d, per_child
 
         col = mode == "column"
-        d = {"display": "flex", "flex-direction": "column" if col else "row", "align-items": "flex-start"}
+        grid = not col and self.is_grid(parent)
+        d: dict = {"display": "flex", "flex-direction": "column", "align-items": "flex-start"} if col else {
+            "display": "flex"}  # fmt: skip
+        if not col and not grid:
+            d["align-items"] = "flex-start"
         order = sorted(range(len(children)), key=lambda i: children[i].y if col else children[i].x)
         main0 = (parent.y + pt) if col else (parent.x + pl)
         gaps = []
@@ -308,27 +359,79 @@ class Generator:
             prev_end = end
         inner = gaps[1:]
         uniform = len(inner) >= 1 and max(inner) - min(inner) <= GAP_TOL and inner[0] > GAP_TOL
-        if uniform:
+        cross0 = (parent.x + pl) if col else (parent.y + pt)
+        cross1 = (parent.right - pr) if col else (parent.bottom - pb)
+        if grid:
+            first, last = children[order[0]], children[order[-1]]
+            # Columns never grow past the designed card width, and shrink together on smaller screens.
+            col_w = max(c.w for c in children)
+            d = {
+                "display": "grid",
+                "grid-template-columns": f"repeat({len(children)}, minmax(0, {px(col_w)}))",
+                "align-items": "start",
+            }
+            if inner and inner[0] > GAP_TOL:
+                d["column-gap"] = px(inner[0])
+            self.grid_columns.add(len(children))
+            for c, cd in zip(children, per_child, strict=True):
+                if c.y - cross0 > GAP_TOL:
+                    cd["margin-top"] = px(c.y - cross0)
+            d["__order__"] = order  # type: ignore[assignment]
+            d["__ctx__"] = "grid"
+            if gaps[0] > GAP_TOL:
+                per_child[order[0]]["margin-left"] = px(gaps[0])
+            del first, last
+            return d, per_child
+        spread = (
+            not col
+            and len(children) == 2
+            and gaps[0] <= GAP_TOL
+            and abs((parent.right - pr) - children[order[-1]].right) <= GAP_TOL
+            and inner[0] > (parent.w - pl - pr) * 0.1
+        )
+        if spread:
+            # Two items pinned to both ends (logo + menu, text + image): keep them there at any width.
+            d["justify-content"] = "space-between"
+            d["column-gap"] = px(min(inner[0], 32))
+        elif uniform:
             d["gap"] = px(inner[0])
+        end_pinned = (
+            not col and not spread and len(order) >= 2 and abs((parent.right - pr) - children[order[-1]].right) <= 2
+        )
         for k, i in enumerate(order):
+            if spread:
+                break
             g = gaps[k] if k == 0 or not uniform else 0
+            if end_pinned and k == len(order) - 1 and gaps[k] > 48:
+                per_child[i]["margin-left"] = "auto"  # stays on the right edge at any width
+                if uniform:
+                    per_child[i]["margin-left"] = "auto"
+                continue
             if g > GAP_TOL:
                 per_child[i]["margin-top" if col else "margin-left"] = px(g)
         # Cross-axis placement.
-        cross0 = (parent.x + pl) if col else (parent.y + pt)
-        cross1 = (parent.right - pr) if col else (parent.bottom - pb)
         for c, cd in zip(children, per_child, strict=True):
             a, b = (c.x, c.right) if col else (c.y, c.bottom)
             lead, trail = a - cross0, cross1 - b
-            if abs(lead - trail) <= ALIGN_TOL and lead > 1:
+            left_text = c.kind == "text" and not self._hug(c) and (c.node or {}).get("textAlignHorizontal", "LEFT") in (
+                "LEFT", "JUSTIFIED")  # fmt: skip
+            if col and left_text and lead > GAP_TOL:
+                cd["margin-left"] = px(lead)  # a left-aligned text box starts where its box starts
+            elif abs(lead - trail) <= ALIGN_TOL and lead > 1:
                 cd["align-self"] = "center"
+                if col and c.kind in ("image", "box", "shape") or (col and self.is_grid(c)):
+                    cd["margin-inline"] = "auto"  # fluid width (max-width) still centred
+                    cd.pop("align-self")
+            elif col and trail <= GAP_TOL and lead > GAP_TOL:
+                cd["align-self"] = "flex-end"
             elif lead > GAP_TOL:
                 cd["margin-left" if col else "margin-top"] = px(lead)
         d["__order__"] = order  # type: ignore[assignment]
+        d["__ctx__"] = "column" if col else "row"
         return d, per_child
 
     def padding(self, e: El, children: list[El]) -> tuple[float, float, float, float]:
-        if not children or e.kind == "wrapper":
+        if not children or e.kind == "wrapper" or (e.kind == "container" and e.layout.get("page_container")):
             return 0, 0, 0, 0
         bt, br, bb, bl = border_widths(e.node or {}) if e.kind == "box" else (0, 0, 0, 0)
         # Figma strokes sit inside the shape; CSS borders add to the box, so padding absorbs them.
@@ -353,7 +456,11 @@ class Generator:
 
         if e.kind == "text":
             tag = e.tag or "p"
-            role = {"h1": "title", "h2": "title", "h3": "heading", "span": "label"}.get(tag, "text")
+            role = {"h1": "title", "h2": "title", "h3": "heading", "span": "label", "a": "link"}.get(tag, "text")
+            if tag == "a":
+                attrs.append(f'href="{html.escape(self.link_for(e))}"')
+            if e.html_id:
+                attrs.insert(0, f'id="{html.escape(e.html_id)}"')
             main.update(self.text_css(e))
             inner = self.text_html(e, role)
             self.expect_text(e)
@@ -369,8 +476,9 @@ class Generator:
                     "width": px(bw),
                     "height": px(bh),
                     "background-color": "#ffffff",
-                    "-webkit-mask": f"{mask_src} center / 100% 100% no-repeat",
-                    "mask": f"{mask_src} center / 100% 100% no-repeat",
+                    "--shape": mask_src,
+                    "-webkit-mask": "var(--shape) center / 100% 100% no-repeat",
+                    "mask": "var(--shape) center / 100% 100% no-repeat",
                     "-webkit-backdrop-filter": f"blur({px(blur / 2)})",
                     "backdrop-filter": f"blur({px(blur / 2)})",
                     "pointer-events": "none",
@@ -388,11 +496,11 @@ class Generator:
             crop = self.image_crop(e) if e.kind == "image" else None
             f = self.image_file(e.asset, e.w, e.h, crop)
             bx, by, bw, bh = self._draw_box(e)
-            alt = "" if e.kind in ("svg", "raster") else html.escape(e.name)
+            alt = "" if e.kind in ("svg", "raster") else html.escape(self.alt_text(e))
             attrs += [f'src="images/{f}"', f'alt="{alt}"', f'width="{round(bw)}"', f'height="{round(bh)}"']
             if e.y > 900:
                 attrs.append('loading="lazy"')
-            main.update({"width": px(bw), "height": px(bh), "flex-shrink": "0"})
+            main.update(self.size_css(e, icon=icon))
             if e.kind == "image":
                 mode = next(
                     (p.get("scaleMode") for p in (e.node or {}).get("fills", []) if p.get("type") == "IMAGE"),
@@ -402,21 +510,24 @@ class Generator:
             main.update(self.visual(e))
             self._expect({"id": e.node["id"], "kind": e.kind, "box": [bx, by, bw, bh], "asset": f})
         elif e.kind == "shape":
-            main.update({"width": px(e.w), "height": px(e.h), "flex-shrink": "0"})
+            main.update(self.size_css(e))
             main.update(self.visual(e))
             css.update(self.deco_rules(e))
             if e.deco:
                 main.update({"position": "relative", "isolation": "isolate"})
             self.expect_box(e)
         else:  # section, container, box, wrapper
+            stage = e.kind == "section" and e.layout.get("stage")
             if e.kind == "section":
                 role = e.role or "section"
                 tag = e.tag or "section"
                 # No clipping: like Figma, layers may extend past the section and later sections paint over them.
-                main.update({"position": "relative", "min-height": px(e.h)})
+                main.update({"position": "relative", "isolation": "isolate"})
                 main.update(self.visual(e))
                 if e.overlay:
                     main["z-index"] = "2"
+                if e.html_id:
+                    attrs.append(f'id="{html.escape(e.html_id)}"')
                 attrs.append(f'data-section="{html.escape(e.role or "")}"')
                 sec_id = f"section:{self.page.frame.get('rootId', 'page')}:{e.id}"
                 attrs.append(f'data-figma-id="{html.escape(sec_id)}"')
@@ -425,33 +536,37 @@ class Generator:
                     attrs.append(f'data-component="{html.escape(e.component)}"')
             elif e.kind == "container":
                 role = "container"
-                left, right = e.x - 0, self.page.width - e.right
-                if abs(left - right) <= 4:
-                    main.update({"width": f"min(100% - 32px, {px(e.w)})", "margin": "0 auto"})
-                else:
-                    main.update({"width": px(e.w), "max-width": "100%", "margin-left": px(left)})
+                if not e.layout.get("page_container"):
+                    left, right = e.x - 0, self.page.width - e.right
+                    if abs(left - right) <= 4:
+                        main.update({"width": f"min(100% - 2 * var(--gutter), {px(e.w)})", "margin-inline": "auto"})
+                    else:
+                        main.update({"width": px(e.w), "max-width": "100%", "margin-left": px(left)})
             elif e.kind == "box":
                 role = e.role or "card"
-                main.update({"width": px(e.w), "max-width": "100%", "flex-shrink": "0"})
+                main.update(self.button_css(e) if e.role == "button" else self.size_css(e))
                 main.update(self.visual(e))
                 css.update(self.deco_rules(e))
                 if e.deco:
                     main.update({"position": "relative", "isolation": "isolate"})
                 if e.role == "button":
-                    attrs.append('href="#"')
+                    attrs.append(f'href="{html.escape(self.link_for(e))}"')
                     main["text-decoration"] = "none"
                 self.expect_box(e)
             else:
                 role = "row" if e.layout.get("mode") == "row" else "stack"
                 if e.layout.get("mode") == "absolute":
                     role = "layer-group"
+                main.update(self.size_css(e))
+                if e.tag == "header":
+                    role = "header"
 
             children = e.children
             box_css = main  # where padding and flow go: the element itself, or a section's stage
             stage_css: dict[str, str] | None = None
-            if e.kind == "section":
-                # The section spans the viewport (backgrounds stretch); its content sits on a stage of the
-                # design's width centred in it, so nothing drifts off-centre on wider or narrower screens.
+            if stage:
+                # Overlapping full-width composition: its content sits on a stage of the design's width,
+                # centred in the section (scaled down on narrow screens, see fit_css).
                 W = self.page.width
                 stage_css = {
                     "position": "relative",
@@ -459,25 +574,35 @@ class Generator:
                     "margin-left": f"calc(50% - {px(W / 2)})",
                     "min-height": px(e.h),
                 }
-                main["isolation"] = "isolate"
+                main["min-height"] = px(e.h)
                 box_css = stage_css
+                self._fit_sections = True
             if e.kind == "section" and len(children) == 1 and children[0].kind == "container":
-                # Band section: one centred container carries the content; the section only pads it.
+                # Band section: one container carries the content; the section only pads it.
                 pad = (children[0].y - e.y, 0, e.bottom - children[0].bottom, 0)
                 pad = tuple(max(0.0, p) for p in pad)
-                flow, per_child = {"display": "flex", "flex-direction": "column"}, [{} for _ in children]
-                box_css["padding"] = f"{px(pad[0])} 0 {px(pad[2])}"
+                flow, per_child = {}, [{} for _ in children]
+                if any(pad):
+                    box_css["padding-block"] = f"{px(pad[0])} {px(pad[2])}" if pad[0] != pad[2] else px(pad[0])
+                child_ctx = "column"
+            elif e.role == "button" and len(children) == 1:
+                pad = (0, 0, 0, 0)
+                flow, per_child = {}, [{}]  # button_css centres the label
+                child_ctx = "row"
             else:  # boxes, wrappers and frame sections (Auto Layout or not) lay out their children directly
                 pad = self.padding(e, children)
                 if any(pad):
-                    box_css["padding"] = " ".join(px(p) for p in pad)
+                    box_css["padding"] = self.padding_value(e, pad)
                 flow, per_child = self.flow_css(e, children, pad)
                 flow.pop("__order__", None)
                 if e.kind == "section":
                     flow.pop("width", None)
                     flow.pop("height", None)
+                    if not stage:
+                        main["min-height"] = px(e.h)
+                child_ctx = flow.pop("__ctx__", "column")
             box_css.update(flow)
-            if e.layout.get("mode") == "row":
+            if e.layout.get("mode") == "row" and child_ctx == "row":
                 attrs.append('data-layout="row"')
 
             parts: list[str] = []
@@ -489,7 +614,14 @@ class Generator:
             if e.layers:
                 if main.get("position", "static") == "static":
                     main["position"] = "relative"
+                if any(id(x) in self._bg for x in e.layers):
+                    main["isolation"] = "isolate"  # background layers (z-index -1) stay inside this box
+                self._ctx.append("layer")
                 for layer in sorted(e.layers, key=lambda x: x.z):
+                    if e.kind == "section" and not stage:
+                        lp = self.anchored_css(layer, e)
+                        parts.append(self.render(layer, lp, depth + 1))
+                        continue
                     full = e.kind == "section" and self._full_bleed(layer)
                     lp = {
                         "position": "absolute",
@@ -504,65 +636,410 @@ class Generator:
                         parts.append(self.render(layer, lp, depth + 1))
                     else:
                         stage_parts.append(self.render(layer, lp, cdepth))
+                self._ctx.pop()
+            self._ctx.append(child_ctx)
+            if e.role == "button":
+                self._component.append("btn")
+            if e.kind == "section" and len(children) == 1 and children[0].kind == "container":
+                self._parent_span.append((children[0].x, children[0].right))
+            else:
+                self._parent_span.append((e.x + pad[3], e.right - pad[1]))
             for c, cd in zip(children, per_child, strict=True):
                 (stage_parts if stage_css is not None else parts).append(self.render(c, cd, cdepth))
+            self._parent_span.pop()
+            self._ctx.pop()
+            if e.role == "button":
+                self._component.pop()
             if measurable:
                 self._anc.pop()
+            if e.tag == "nav":
+                # Placement (margins from the parent) stays on <nav>; the flex row goes on the list.
+                list_cls = self.class_for("menu", css)
+                nav_css = {k: v for k, v in placement.items() if not k.startswith("__")}
+                nav_cls = self.class_for("nav", {"": nav_css}) if nav_css else ""
+                nav_attr = f' class="{nav_cls}"' if nav_cls else ""
+                items = "\n".join(f"{ind}    <li>{part.strip()}</li>" for part in parts)
+                return (
+                    f'{ind}<nav{nav_attr} aria-label="Main">\n{ind}  <ul class="{list_cls} l-row" role="list">\n'
+                    f"{items}\n{ind}  </ul>\n{ind}</nav>"
+                )
             if stage_css is not None:
                 stage_cls = self.class_for("stage", {"": stage_css})
                 sind = "  " * (depth + 1)
-                stage = f'{sind}<div class="{stage_cls} l-stage">\n' + "\n".join(stage_parts) + f"\n{sind}</div>"
-                parts = parts + [stage]
+                stage_html = f'{sind}<div class="{stage_cls} l-stage">\n' + "\n".join(stage_parts) + f"\n{sind}</div>"
+                parts = parts + [stage_html]
+                attrs.append('data-fit=""')
             inner = "\n" + "\n".join(parts) + "\n" + ind
+            if e.kind == "container" and e.layout.get("page_container"):
+                cls_extra = self.class_for("content", css) if any(main.values()) else ""
+                a = (" " + " ".join(attrs)) if attrs else ""
+                klass = "container" + (f" {cls_extra}" if cls_extra else "")
+                if e.layout.get("mode") == "row" and main.get("display") != "grid":
+                    klass += " l-row"
+                return f'{ind}<div class="{klass}"{a}>{inner}</div>'
 
+        bleed_done = placement.pop("__bleed_done__", None) if "__bleed_done__" in placement else None
         main.update(placement)
-        if id(e) in self._stack:
+        if id(e) in self._bg:
+            main["z-index"] = "-1"
+        elif id(e) in self._stack:
             # Overlaps something outside its own box: paint exactly where Figma paints it.
-            main["z-index"] = str(e.z + 1)
+            main["z-index"] = str(self._levels.get(id(e), 1))
             if main.get("position", "static") == "static":
                 main["position"] = "relative"
-        if e.bleed:
+        if e.bleed and not bleed_done:
             self._apply_bleed(e, main)
         if e.mask:
             main.update(self.mask_css(e))
         if e.kind in ("box", "shape"):
             self._extend_to_edge(e, main)
-        cls = self.class_for(role, css)
-        utility = (" l-row" if e.layout.get("mode") == "row" else "") + (" t-lock" if e.kind == "text" else "")
+        if e.role == "button" and e.kind == "box":
+            place = {k: main.pop(k) for k in list(main) if k in PLACEMENT_KEYS}
+            if e.deco and "position" not in main:
+                main["position"] = "relative"
+            cls = self.class_for("btn", css, component="btn")
+            if place:
+                cls += " " + self.class_for("action", {"": place})
+        else:
+            cls = self.class_for(role, css)
+        utility = " l-row" if e.layout.get("mode") == "row" and "grid" not in main.get("display", "") else ""
+        if main.get("display") == "grid" and main.get("grid-template-columns", "").startswith("repeat("):
+            utility += f" l-grid-{main['grid-template-columns'][7:].split(',')[0]}"
         extra = ' class="' + cls + utility + '"'
         a = (" " + " ".join(attrs)) if attrs else ""
         if tag == "img":
             return f"{ind}<img{extra}{a}>"
         return f"{ind}<{tag}{extra}{a}>{inner}</{tag}>"
 
+    # ------------------------------------------------------------------ semantics
+    def semantics(self, page: Page) -> None:
+        """Section ids (anchor targets), nav menus, the site header and link targets."""
+        used: set[str] = set()
+        self._anchors = {}
+        for sec in page.sections:
+            base = slug(sec.role or "section")
+            hid, n = base, 2
+            while hid in used:
+                hid, n = f"{base}-{n}", n + 1
+            used.add(hid)
+            sec.html_id = hid
+            self._anchors.setdefault(_norm(hid.replace("-", " ")), f"#{hid}")
+            heading = next((t for t in _texts(sec) if t.tag in ("h1", "h2")), None)
+            if heading is not None:
+                self._anchors.setdefault(_norm(heading.node.get("characters", "")), f"#{hid}")
+            # Further headings inside a section (a "Contact us" block in the same band) are targets too.
+            for t in _texts(sec):
+                if t is heading or t.tag not in ("h2", "h3"):
+                    continue
+                key = _norm(t.node.get("characters", ""))
+                if not key or key in self._anchors or len(key.split()) > 4:
+                    continue
+                tid, n = slug(key), 2
+                while tid in used:
+                    tid, n = f"{slug(key)}-{n}", n + 1
+                used.add(tid)
+                t.html_id = tid
+                self._anchors[key] = f"#{tid}"
+        if page.sections:
+            self._anchors.setdefault("home", f"#{page.sections[0].html_id}")
+            self._anchors.setdefault("top", f"#{page.sections[0].html_id}")
+
+        for sec in page.sections:
+            for box in sec.walk():
+                imgs = [c for c in box.children if c.kind == "image"]
+                texts = [t for t in _texts(box) if t.node.get("characters", "").strip()]
+                if len(imgs) == 1 and texts and box.kind in ("box", "wrapper"):
+                    best = max(texts, key=lambda t: (_font_size(t), -t.y))
+                    self._alt_context.setdefault(id(imgs[0]), best.node.get("characters", "").split("\n")[0][:80])
+
+        def visit(e: El, parent: El | None, sec: El) -> None:
+            if self.is_nav(e):
+                e.tag = "nav"
+                for t in e.children:
+                    t.tag, t.role = "a", "link"
+                if sec is page.sections[0] and sec.h <= 160 and sec.tag in (None, "section"):
+                    sec.tag = "header"  # a thin top band holding the menu is the site header
+                elif parent is not None and parent.kind == "wrapper" and parent.y < 240 and parent.tag is None:
+                    parent.tag = "header"
+            for c in e.children:
+                visit(c, e, sec)
+
+        for sec in page.sections[:2]:
+            visit(sec, None, sec)
+        self.heading_order(page)
+
+    @staticmethod
+    def heading_order(page: Page) -> None:
+        """Headings in document order never skip a level, and nothing before the h1 is a heading
+        (a logo or tagline above the main title is a paragraph)."""
+
+        def order(e: El):
+            for c in e.layers + e.children:
+                if c.kind == "text":
+                    yield c
+                yield from order(c)
+
+        texts = [t for sec in page.sections for t in order(sec)]
+        heads = [t for t in texts if t.tag in ("h1", "h2", "h3")]
+        first_h1 = next((i for i, t in enumerate(heads) if t.tag == "h1"), None)
+        prev = 0
+        for i, t in enumerate(heads):
+            if first_h1 is not None and i < first_h1:
+                t.tag = None  # rendered as <p>
+                continue
+            level = int(t.tag[1])
+            if level > prev + 1:
+                level = prev + 1
+                t.tag = f"h{level}"
+            prev = level
+
+    @staticmethod
+    def is_nav(e: El) -> bool:
+        """A row of 2–8 short one-line labels in the same style: a navigation menu."""
+        if e.kind != "wrapper" or e.layout.get("mode") != "row" or not 2 <= len(e.children) <= 8:
+            return False
+        if not all(c.kind == "text" for c in e.children):
+            return False
+        sizes = set()
+        for c in e.children:
+            chars = c.node.get("characters", "").strip()
+            if not chars or "\n" in chars or len(chars.split()) > 3 or len(chars) > 24:
+                return False
+            sizes.add(round(_font_size(c)))
+        return len(sizes) == 1 and max(sizes) <= 24
+
+    def base_text_style(self, page: Page) -> dict[str, str]:
+        """The most common paragraph style becomes the body style; text only declares what differs."""
+        counts: Counter = Counter()
+        for sec in page.sections:
+            for t in _texts(sec):
+                if t.tag in ("h1", "h2", "h3"):
+                    continue
+                n = t.node or {}
+                segs = n.get("textSegments") or [{}]
+                st = text_style(max(segs, key=lambda s: len(s.get("characters", ""))), n)
+                key = tuple((k, st[k]) for k in ("font-family", "font-size", "line-height", "color") if k in st)
+                counts[key] += len(n.get("characters", ""))
+        if not counts:
+            return {}
+        return dict(counts.most_common(1)[0][0])
+
+    # ------------------------------------------------------------------ fluid sizing
+    def size_css(self, e: El, icon: bool = False) -> dict[str, str]:
+        """Width/height for an element, written the way a front-end developer would.
+
+        Flow content is fluid (fills its column up to the design size and keeps its aspect ratio);
+        only icons, decorations and absolutely positioned pieces keep fixed pixel sizes.
+        """
+        ctx = self._ctx[-1]
+        bx, by, bw, bh = self._draw_box(e)
+        fixed = ctx in ("absolute", "layer") or e.bleed or icon
+        if e.kind in ("image", "svg", "raster"):
+            if fixed:
+                return {"width": px(bw), "height": px(bh), "flex-shrink": "0"} if ctx == "row" or icon else {
+                    "width": px(bw), "height": px(bh)}  # fmt: skip
+            ratio = f"{round(bw)} / {round(bh)}"
+            if ctx == "row":
+                return {"flex": f"0 1 {px(bw)}", "width": "100%", "max-width": px(bw), "min-width": "0",
+                        "height": "auto", "aspect-ratio": ratio}  # fmt: skip
+            if ctx == "grid":
+                return {"width": "100%", "height": "auto", "aspect-ratio": ratio}
+            return {"width": "100%", "max-width": px(bw), "height": "auto", "aspect-ratio": ratio}
+        if e.kind == "shape":
+            if fixed or ctx == "row":
+                return {"width": px(e.w), "height": px(e.h), "flex-shrink": "0"}
+            if ctx == "grid":
+                return {"height": px(e.h)}
+            return {"width": "100%", "max-width": px(e.w), "height": px(e.h)}
+        if e.kind == "box":
+            if e.layout.get("mode") == "absolute":
+                d = {"width": px(e.w), "max-width": "100%"}
+                return d if not fixed else {"width": px(e.w)}
+            if fixed:
+                return {"width": px(e.w)}
+            if ctx == "row":
+                return {"flex": f"0 1 {px(e.w)}", "width": "100%", "max-width": px(e.w), "min-width": "0"}
+            if ctx == "grid":
+                return {}
+            return {} if self._fills_parent(e) else {"width": "100%", "max-width": px(e.w)}
+        if e.kind == "wrapper":
+            if fixed:
+                return {"width": px(e.w)}
+            if ctx == "row":
+                return {"min-width": "0"}
+            if self.is_grid(e) and ctx == "column" and not self._fills_parent(e):
+                return {"width": "100%", "max-width": px(e.w)}
+        return {}
+
+    @staticmethod
+    def _hug(e: El) -> bool:
+        return (e.node or {}).get("textAutoResize") == "WIDTH_AND_HEIGHT"
+
+    def button_css(self, e: El) -> dict[str, str]:
+        """Buttons hug their label: inline-flex, centred, padding from the design (min-width keeps the
+        designed width when the label box was wider than its text)."""
+        d = {"display": "inline-flex", "align-items": "center", "justify-content": "center"}
+        texts = _texts(e)
+        if len(texts) != 1:
+            d["min-width"] = px(e.w)
+            return d
+        t = texts[0]
+        bt, br, bb, bl = border_widths(e.node or {})
+        top, bottom = max(0.0, t.y - e.y - bt), max(0.0, e.bottom - t.bottom - bb)
+        if self._hug(t):
+            left, right = max(0.0, t.x - e.x - bl), max(0.0, e.right - t.right - br)
+            side = (left + right) / 2
+        else:
+            side = 0.0
+            d["min-width"] = px(e.w)
+        d["padding"] = px(top) if top == bottom and top == side else (
+            f"{px(top)} {px(side)}" if top == bottom else f"{px(top)} {px(side)} {px(bottom)}")  # fmt: skip
+        if self._ctx[-1] == "row":
+            d["flex-shrink"] = "0"
+        return d
+
+    def _fills_parent(self, e: El) -> bool:
+        """Whether e spans its parent's content box (set by flow_css before children render)."""
+        span = self._parent_span[-1] if self._parent_span else None
+        return bool(span) and e.x <= span[0] + 2 and e.right >= span[1] - 2
+
+    def is_grid(self, e: El) -> bool:
+        """A row of equally wide, evenly spaced items (cards, photos, features) becomes a CSS grid."""
+        kids = e.children
+        if e.layout.get("mode") != "row" or len(kids) < 2 or e.layout.get("auto"):
+            return False
+        if all(k.kind == "text" for k in kids):
+            return False
+        ws = [k.w for k in kids]
+        if max(ws) - min(ws) > 2 or min(ws) < 40:
+            return False
+        order = sorted(kids, key=lambda k: k.x)
+        gaps = [b.x - a.right for a, b in zip(order, order[1:], strict=False)]
+        return max(gaps) - min(gaps) <= 2 and min(gaps) >= 0
+
+    def padding_value(self, e: El, pad: tuple[float, float, float, float]) -> str:
+        """Padding; on full-width elements, large side padding becomes a centred content column."""
+        t, r, b, left = pad
+        W = self.page.width
+        if e.w >= W * 0.95 and left > W * 0.08 and r > W * 0.08:
+            lv = f"max(var(--gutter), calc(50% - {px(W / 2 - left)}))"
+            rv = f"max(var(--gutter), calc(50% - {px(W / 2 - r)}))"
+            return f"{px(t)} {rv} {px(b)} {lv}"
+        if t == b and left == r:
+            return px(t) if t == left else f"{px(t)} {px(left)}"
+        return " ".join(px(v) for v in pad)
+
+    @staticmethod
+    def _center(offset: float) -> str:
+        if abs(offset) < 0.5:
+            return "50%"
+        return f"calc(50% {'+' if offset > 0 else '-'} {px(abs(offset))})"
+
+    def anchored_css(self, layer: El, sec: El) -> dict[str, str]:
+        """A section background layer positioned like Figma constraints would: full-bleed layers stretch,
+        layers touching a frame edge stay on that edge, everything else stays put relative to the centre."""
+        W = self.page.width
+        x, y, w, _h = self._draw_box(layer)
+        d = {"position": "absolute", "top": px(y - sec.y), "__bleed_done__": "1"}
+        left_edge, right_edge = layer.x <= 1, layer.right >= W - 1
+        if left_edge and right_edge and not layer.bleed:
+            d.update({"left": "0", "width": "100%"})
+        elif left_edge and not layer.bleed:
+            d.update({"left": "0", "width": self._center(layer.right - W / 2)})
+        elif right_edge and not layer.bleed:
+            d.update({"right": "0", "width": f"calc(50% + {px(W / 2 - layer.x)})"})
+        else:
+            d["left"] = self._center(x - W / 2)
+        if "width" in d and layer.kind in ("svg", "raster", "image"):
+            d["object-fit"] = "cover"
+        return d
+
+    GENERIC_NAME = re.compile(
+        r"^(rectangle|image|img|photo|picture|frame|group|mask group|ellipse|vector|place your|bg|background)"
+        r"|\d+$|\(double click", re.I)  # fmt: skip
+
+    def alt_text(self, e: El) -> str:
+        """Layer names like "Rectangle 250" are not descriptions: use the nearest heading instead."""
+        name = (e.name or "").strip()
+        if name and not self.GENERIC_NAME.search(name) and len(name.split()) <= 12:
+            return name
+        heading = self._alt_context.get(id(e))
+        return heading or ""
+
+    def link_for(self, e: El) -> str:
+        """Buttons and nav items whose label names a section link to it (single-page navigation)."""
+        label = " ".join(t.node.get("characters", "") for t in _texts(e)) if e.kind != "text" else e.node.get(
+            "characters", "")  # fmt: skip
+        key = _norm(label)
+        found = self._anchors.get(key) or self.page_links.get(key)
+        if found:
+            return found
+        contact = next((v for k, v in self._anchors.items() if "contact" in k), None)
+        if contact and e.kind != "text" and CTA_WORDS.search(key):
+            return contact  # "Get in touch", "I need help", "Book a call"… go to the contact section
+        return "#"
+
     @staticmethod
     def stacking(sec: El) -> set[int]:
-        """Elements that overlap another element outside their own ancestry.
+        return Generator.stacking_info(sec)[0]
 
-        They get z-index = Figma paint order, so the browser stacks them exactly like Figma, wherever
-        layout inference put them in the DOM. Wrappers never get a z-index, so they stay transparent
-        to stacking; boxes that do get one keep their children on top of them, as in Figma.
+    @staticmethod
+    def stacking_info(sec: El) -> tuple[set[int], set[int], dict[int, int]]:
+        """(need, background, levels): how each element must stack to paint exactly in Figma's order.
+
+        Background layers (positioned layers painted below everything they overlap) get z-index -1
+        inside their isolated parent, so the content above them needs nothing. Any other element that
+        overlaps something outside its own ancestry gets z-index = its Figma paint order, wherever
+        layout inference put it in the DOM. Wrappers never get a z-index, so they stay transparent.
         """
         painted: list[tuple[El, frozenset]] = []
+        layers: set[int] = set()
 
         def visit(e: El, chain: frozenset) -> None:
             for c in e.layers + e.children:
                 if c.kind in PAINT_KINDS:
                     painted.append((c, chain))
+                    if c in e.layers:
+                        layers.add(id(c))
                 visit(c, chain | {id(c)})
 
         visit(sec, frozenset())
         painted.sort(key=lambda t: t[0].x)
+
+        def overlaps(i: int):
+            a, chain_a = painted[i]
+            for j, (b, chain_b) in enumerate(painted):
+                if j == i or id(a) in chain_b or id(b) in chain_a or not a.intersects(b):
+                    continue
+                yield b
+
+        # Bottom-up: a layer is background if everything below it that it overlaps is background too.
+        background: set[int] = set()
+        for i in sorted(range(len(painted)), key=lambda k: painted[k][0].z):
+            a = painted[i][0]
+            if id(a) in layers and all(b.z > a.z or id(b) in background for b in overlaps(i)):
+                background.add(id(a))
         need: set[int] = set()
+        pairs: dict[int, list[El]] = {}
         for i, (a, chain_a) in enumerate(painted):
+            if id(a) in background:
+                continue
             for b, chain_b in painted[i + 1 :]:
                 if b.x >= a.right:
                     break
-                if id(a) in chain_b or id(b) in chain_a or not a.intersects(b):
+                if id(b) in background or id(a) in chain_b or id(b) in chain_a or not a.intersects(b):
                     continue
                 need.add(id(a))
                 need.add(id(b))
-        return need
+                pairs.setdefault(id(a), []).append(b)
+                pairs.setdefault(id(b), []).append(a)
+        # Smallest z-index that keeps every overlapping pair in Figma's order: identical elements end up
+        # with the same value (and share a class) instead of one unique number each.
+        levels: dict[int, int] = {}
+        for e, _chain in sorted((t for t in painted if id(t[0]) in need), key=lambda t: t[0].z):
+            below = [levels[id(o)] for o in pairs.get(id(e), []) if o.z < e.z and id(o) in levels]
+            levels[id(e)] = 1 + max(below, default=0)
+        return need, background, levels
 
     def _extend_to_edge(self, e: El, d: dict[str, str]) -> None:
         """A solid panel touching the frame's left or right edge keeps touching the screen edge on wider
@@ -570,6 +1047,8 @@ class Generator:
         width they sit outside the viewport."""
         W = self.page.width
         bg = d.get("background-color")
+        if "calc(" in d.get("width", "") or d.get("width") == "100%":
+            return  # already anchored to the screen edge
         left, right = e.x <= 1, e.right >= W - 1
         if not bg or (left and right) or not (left or right) or e.w < 40 or e.mask or "border-radius" in d:
             return
@@ -642,23 +1121,42 @@ class Generator:
         align = n.get("textAlignHorizontal")
         if align in ("CENTER", "RIGHT", "JUSTIFIED"):
             d["text-align"] = {"CENTER": "center", "RIGHT": "right", "JUSTIFIED": "justify"}[align]
-        d["margin"] = "0"
         resize = n.get("textAutoResize")
-        # Blueprint lock: every text box keeps its Figma size on desktop, so a line that renders a
-        # pixel taller (or a fallback font) cannot push the rest of the page. Released on mobile.
-        d["width"] = px(e.w)
-        d["height"] = px(e.h)
-        d["max-width"] = "100%"
-        d["white-space"] = "pre-wrap" if resize in ("HEIGHT", "NONE", "TRUNCATE") else "pre"
-        d["flex-shrink"] = "0"
+        chars = n.get("characters", "")
+        lh = line_height_px({**n, **{k: v for k, v in base_seg.items() if k == "lineHeight"}}) or 0
+        lines = round(e.h / lh) if lh else 1
+        ctx = self._ctx[-1]
+        if d.get("line-height") == "normal" and lines >= 1:
+            # Figma "Auto" line height: write the measured value, so a fallback font cannot change heights.
+            d["line-height"] = px(e.h / lines)
+        if resize == "WIDTH_AND_HEIGHT":
+            # Hugging text: its width is its content. Short labels never wrap.
+            if "\n" not in chars and len(chars) <= 60:
+                d["white-space"] = "nowrap"
+        elif ctx in ("absolute", "layer"):
+            d["width"] = px(e.w)
+        elif ctx == "row":
+            # In a row the text box keeps its designed width (it may shrink): neighbours stay in place.
+            d["flex"] = f"0 1 {px(e.w)}"
+            d["min-width"] = "0"
+            if align in ("CENTER", "RIGHT", "JUSTIFIED"):
+                d["width"] = "100%"
+        elif lines > 1 or align in ("CENTER", "RIGHT", "JUSTIFIED"):
+            # Wrapping text keeps Figma's line length as a maximum, so it reflows on small screens.
+            d["max-width"] = px(e.w)
+            if align in ("CENTER", "RIGHT", "JUSTIFIED"):
+                d["width"] = "100%"
         d.update(self.visual(e))
+        for k, v in (self.body_style or {}).items():
+            if d.get(k) == v:
+                del d[k]  # inherited from body
         return d
 
     def text_html(self, e: El, role: str) -> str:
         n = e.node or {}
         segs = n.get("textSegments") or []
         if len(segs) <= 1:
-            return html.escape(n.get("characters", ""))
+            return _text(n.get("characters", ""))
         base_seg = max(segs, key=lambda s: len(s.get("characters", "")))
         base = text_style(base_seg, n)
         out = []
@@ -670,7 +1168,7 @@ class Generator:
                     diff[k] = reset
             if ("font-weight" in diff or "font-style" in diff) and "font-family" in st:
                 diff["font-family"] = st["font-family"]  # keeps font loading explicit per weight
-            txt = html.escape(s.get("characters", ""))
+            txt = _text(s.get("characters", ""))
             if diff:
                 cls = self.class_for("span", {"": diff})
                 out.append(f'<span class="{cls}">{txt}</span>')
@@ -691,6 +1189,8 @@ class Generator:
                 "box": [e.x, e.y, e.w, e.h],
                 "lineHeight": lh,
                 "lines": round(e.h / lh) if lh else None,
+                "hug": n.get("textAutoResize") == "WIDTH_AND_HEIGHT",
+                "align": n.get("textAlignHorizontal") or "LEFT",
                 "style": {k: st[k] for k in ("font-family", "font-size", "font-weight", "color") if k in st},
             }
         )
@@ -753,6 +1253,8 @@ class Generator:
         for parts in self.rules.values():
             d = parts.get("", {})
             fam = d.get("font-family", "").strip("'")
+            if not fam and "font-weight" in d:
+                fam = (self.body_style or {}).get("font-family", "").strip("'")
             if not fam:
                 continue
             weight = int(d.get("font-weight", "400"))
@@ -806,8 +1308,16 @@ class Generator:
         return fonts, "\n\n".join(faces), href
 
     # ------------------------------------------------------------------ tokens + css text
-    def css_text(self) -> tuple[str, str]:
+    def css_text(self, head: list[tuple[str, dict[str, str]]] | None = None) -> tuple[str, str]:
+        """Rules as text, with design tokens: colours, fonts, spacing, radii, shadows and font sizes.
+
+        `head` holds element-level rules (body, headings) written before the class rules.
+        """
+        self.tokenize()
         blocks = []
+        for sel, decls in head or []:
+            if decls:
+                blocks.append(f"{sel} {{\n" + "\n".join(f"  {k}: {v};" for k, v in decls.items()) + "\n}")
         for cls, parts in self.rules.items():
             for suffix, decls in parts.items():
                 if not decls:
@@ -827,10 +1337,53 @@ class Generator:
         families = sorted(set(re.findall(r"font-family: '([^']+)'", text)))
         for fam in families:
             text = text.replace(f"font-family: '{fam}'", f"font-family: var(--font-{slug(fam, 'font')})")
-        root_lines = [f"  {v}: {c};" for c, v in tokens.items()]
+        # At the design width the container must be exactly the designed column, so the side gutter can
+        # never be larger than the space the design leaves around it (it is 16px on phones regardless).
+        gutter = max(0, min(GUTTER, math.floor((self.design_width - self.container_width) / 2)))
+        root_lines = [f"  --container: {px(self.container_width or 1200)};", f"  --gutter: {px(gutter)};"]
+        root_lines += [f"  {v}: {c};" for c, v in tokens.items()]
         root_lines += [f"  --font-{slug(f, 'font')}: '{f}', system-ui, sans-serif;" for f in families]
-        root = ":root {\n" + "\n".join(root_lines) + "\n}" if root_lines else ""
+        root_lines += [f"  {var}: {val};" for var, val in self.tokens]
+        root = ":root {\n" + "\n".join(root_lines) + "\n}"
         return root, text
+
+    def tokenize(self) -> None:
+        """Values repeated across the stylesheet become named tokens (spacing, radii, shadows, sizes)."""
+        groups = {
+            "space": ("gap", "column-gap", "row-gap", "padding", "padding-block", "margin-top", "margin-left"),
+            "radius": ("border-radius",),
+            "shadow": ("box-shadow",),
+            "font-size": ("font-size",),
+        }
+        self.tokens: list[tuple[str, str]] = []
+        for name, props in groups.items():
+            counts: Counter = Counter()
+            for parts in self.rules.values():
+                for decls in parts.values():
+                    for k, v in decls.items():
+                        if k not in props:
+                            continue
+                        values = v.split() if name in ("space", "radius") else [v]
+                        for part in values:
+                            if name == "space" and not re.fullmatch(r"\d+(\.\d+)?px", part):
+                                continue
+                            if name == "space" and float(part[:-2]) < 4:
+                                continue
+                            counts[part] += 1
+            chosen = sorted((v for v, n in counts.items() if n >= (3 if name == "space" else 2)), key=_sort_key)
+            if not chosen:
+                continue
+            names = {v: f"--{name}-{i + 1}" for i, v in enumerate(chosen)}
+            self.tokens += [(var, v) for v, var in names.items()]
+            for parts in self.rules.values():
+                for decls in parts.values():
+                    for k, v in list(decls.items()):
+                        if k not in props:
+                            continue
+                        if name in ("space", "radius"):
+                            decls[k] = " ".join(f"var({names[part]})" if part in names else part for part in v.split())
+                        elif v in names:
+                            decls[k] = f"var({names[v]})"
 
     # ------------------------------------------------------------------ main
     def add_page(self, page: Page, filename: str) -> dict:
@@ -839,11 +1392,22 @@ class Generator:
         self.expect = []
         self.warnings.extend(w for w in page.warnings if w not in self.warnings)
         self.assign_roles()
+        self.semantics(page)
+        if self.body_style is None:
+            self.body_style = self.base_text_style(page)
+        if page.container:
+            self.container_width = max(self.container_width, page.container[1])
+            self.design_width = max(self.design_width, page.width)
         body_parts = []
         prev_bottom = 0.0
         self._stack = set()
+        self._bg = set()
+        self._levels = {}
         for sec in page.sections:
-            self._stack |= self.stacking(sec)
+            need, bg, levels = self.stacking_info(sec)
+            self._stack |= need
+            self._bg |= bg
+            self._levels.update(levels)
         for sec in page.sections:
             self.section_slug = sec.role or "section"
             # Sections stack in normal flow: keep any gap (or overlap) the design has between them.
@@ -890,46 +1454,65 @@ class Generator:
         if fit <= MOBILE_MAX + 1:
             return ""
         self.assumptions.append(
-            "Content stays centred on any screen; between 768px and "
-            f"{fit}px the layout scales down so nothing is cut off."
+            "Overlapping compositions keep their exact arrangement: between 768px and "
+            f"{fit}px those sections scale down so nothing is cut off."
         )
-        lines = [f"/* Below {fit}px the layout scales down (like the browser's zoom) so all content stays visible. */"]
+        lines = [f"/* Composition sections (overlapping layers) scale down below {fit}px so nothing is cut off. */"]
         top = fit
         while top > MOBILE_MAX + 1:
             low = max(MOBILE_MAX + 1, top - FIT_STEP)
             query = f"(min-width: {low}px) and (max-width: {top - 0.02:.2f}px)"
-            lines.append(f"@media {query} {{ main {{ zoom: {low / fit:.4f}; }} }}")
+            lines.append(f"@media {query} {{ [data-fit] {{ zoom: {low / fit:.4f}; }} }}")
             top = low
         return "\n".join(lines)
 
     def finish(self, out_dir: Path, pages: list[dict]) -> Output:
-        root_css, rules_css = self.css_text()
+        head = [("body", dict(self.body_style or {}))]
+        root_css, rules_css = self.css_text(head)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "css").mkdir(exist_ok=True)
         images = self.write_images(out_dir)
         fonts, faces, google_href = self.write_fonts(out_dir)
         page_bg = pages[0]["background"] if pages else "#ffffff"
         base = (
+            "/* Base */\n"
             "*, *::before, *::after { box-sizing: border-box; }\n"
+            "html { scroll-behavior: smooth; }\n"
             f"html, body {{ margin: 0; padding: 0; background: {page_bg}; }}\n"
             "body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }\n"
+            "h1, h2, h3, h4, h5, h6 { font-size: inherit; font-weight: inherit; }\n"
+            "h1, h2, h3, h4, h5, h6, p, figure { margin: 0; }\n"
             "img { display: block; max-width: 100%; }\n"
             "a { color: inherit; }\n"
-            "main { overflow-x: clip; }"
+            "nav ul { list-style: none; margin: 0; padding: 0; }\n"
+            "nav a { text-decoration: none; }\n"
+            "main { overflow-x: clip; }\n"
+            "[id] { scroll-margin-top: 24px; }\n\n"
+            "/* Layout */\n"
+            ".container { width: min(100% - 2 * var(--gutter), var(--container)); margin-inline: auto; }"
         )
-        responsive = (
+        grids = sorted(self.grid_columns)
+        tablet = ", ".join(f".l-grid-{n}" for n in grids if n > 2)
+        mobile = ", ".join(f".l-grid-{n}" for n in grids)
+        responsive = "/* Responsive */\n"
+        if tablet:
+            responsive += (
+                "@media (max-width: 1023px) {\n"
+                f"  {tablet} {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}\n}}\n"
+            )
+        responsive += (
             "/* Inferred mobile layout: rows stack below 768px (no mobile frame was supplied). */\n"
             "@media (max-width: 767px) {\n"
+            "  :root { --gutter: 16px; }\n"
             "  .l-stage { width: auto; margin-left: 0; }\n"
-            "  .l-row { flex-direction: column; flex-wrap: wrap; align-items: center; }\n"
-            "  .l-row > * { margin-left: 0; }\n"
-            "  .t-lock { height: auto; white-space: pre-wrap; }\n"
-            "  img { height: auto; }\n"
-            "}"
+            "  .l-row { flex-direction: column; align-items: flex-start; row-gap: 16px; }\n"
+            "  .l-row > * { flex: none; margin-left: 0; max-width: 100%; }\n"
+            + (f"  {mobile} {{ grid-template-columns: 1fr; row-gap: 24px; }}\n" if mobile else "")
+            + "}"
         )
         if not any(f["role"] == "mobile" for f in self.bundle["frames"]):
             self.assumptions.append("No mobile frame: a simple stacked mobile layout was inferred below 768px.")
-        fit = self.fit_css(pages[0]["width"] if pages else 1440)
+        fit = self.fit_css(pages[0]["width"] if pages else 1440) if self._fit_sections else ""
         css = "\n\n".join(p for p in [faces, root_css, base, rules_css, fit, responsive] if p) + "\n"
         site = html.escape(self.bundle["source"].get("fileName", "Site"))
         font_link = f'  <link rel="stylesheet" href="{html.escape(google_href)}">\n' if google_href else ""
@@ -995,6 +1578,9 @@ def generate_site(
         shutil.rmtree(out_dir)
     gen = Generator(None, bundle, asset_dir, font_dir)
     gen.asset_hashes = asset_hashes or {}
+    gen.page_links = {_norm(page.name): filename for page, filename in pages}
+    if len(pages) > 1:
+        gen.page_links.update({"home": pages[0][1]})
     results = [gen.add_page(page, filename) for page, filename in pages]
     out = gen.finish(out_dir, results)
     meta = {

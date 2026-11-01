@@ -222,6 +222,15 @@ def verify(
             continue
         dx, dy, dw, dh = a["x"] - ex, a["y"] - ey, a["w"] - ew, a["h"] - eh
         if exp["kind"] == "text":
+            if not exp.get("hug", True):
+                # Fixed-width Figma text box: the HTML element may hug its content, so compare the edge
+                # the text is aligned to, and only flag text wider than its box.
+                align = exp.get("align", "LEFT")
+                if align == "CENTER":
+                    dx = (a["x"] + a["w"] / 2) - (ex + ew / 2)
+                elif align == "RIGHT":
+                    dx = (a["x"] + a["w"]) - (ex + ew)
+                dw = max(0.0, dw)
             ok = abs(dx) <= _tol(ew, 0.01, 3) and abs(dy) <= _tol(eh, 0.02, 4) and abs(dw) <= _tol(ew, 0.04, 4)
         else:
             ok = all(abs(d) <= _tol(s, 0.01, 2) for d, s in ((dx, ew), (dy, eh), (dw, ew), (dh, eh)))

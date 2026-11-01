@@ -1,7 +1,6 @@
 """v0.4: paint order, masks, crops, gradients, exported opacity, any-width layout and a checker that never hangs."""
 
 import os
-import re
 import time
 
 import pytest
@@ -128,16 +127,28 @@ def _site(bundle, tmp_path):
     return page, gen, tmp_path / "out"
 
 
-def test_sections_use_a_centred_stage_and_fit_zoom(bundle, tmp_path):
+def test_content_column_is_a_container_not_a_stage(bundle, tmp_path):
+    """v0.5: normal sections use one shared .container; only overlapping compositions keep a stage."""
     page, gen, out = _site(bundle, tmp_path)
     html = (out / "index.html").read_text()
     css = (out / "css" / "styles.css").read_text()
-    assert html.count("l-stage") == len(page.sections)
-    assert f"calc(50% - {page.width / 2:g}px)" in css
-    zooms = re.findall(r"max-width: ([\d.]+)px\) \{ main \{ zoom: ([\d.]+)", css)
-    assert zooms and all(float(z) < 1 for _, z in zooms)
-    assert float(zooms[0][0]) < page.width  # the design width itself is never zoomed (fidelity unchanged)
-    assert ".l-stage { width: auto; margin-left: 0; }" in css
+    assert page.container == (80.0, 1280)
+    assert "--container: 1280px;" in css
+    assert ".container { width: min(100% - 2 * var(--gutter), var(--container)); margin-inline: auto; }" in css
+    assert "l-stage" not in html and "zoom" not in css  # nothing here overlaps: no scaling fallback
+    assert ":root { --gutter: 16px; }" in css  # phones get their own side padding
+
+
+def test_compositions_keep_a_stage_with_fit_zoom(bundle, tmp_path):
+    page = build_pages(bundle)[0]
+    layout_page(page)
+    sec = page.sections[1]
+    sec.layout["stage"] = True  # as if its layers overlapped across the full width
+    gen = Generator(page, bundle, tmp_path)
+    gen.add_page(page, "index.html")
+    assert gen._fit_sections
+    css = gen.fit_css(page.width)
+    assert "[data-fit] { zoom:" in css and "main { zoom" not in css
 
 
 @pytest.mark.skipif(not _browser_available(), reason="Chromium not installed")

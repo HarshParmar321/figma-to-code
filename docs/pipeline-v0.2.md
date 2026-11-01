@@ -67,13 +67,33 @@ Found on the Peachy Pup file (10,949 layers) and the services page viewed on a l
 
 Results: Peachy Pup 94/94 elements in place, 98% / 97% / 97% / 100% section similarity (score capped at 69 only because the paid font TT Hoves is not installed); cleaning page 99.8; services page 83/83 (TT Hoves cap).
 
+## v0.5: clean structure (code a developer would write)
+
+Before: every element copied its exact Figma box (fixed width and height on all text, margins measured from the frame edge, a design-width stage scaled with zoom). Pixel-perfect at one width, not maintainable, poor on other screens.
+
+| Area | Now |
+| --- | --- |
+| **Content column** | One shared `.container { width: min(100% - 2 * var(--gutter), var(--container)); margin-inline: auto }`. Its width is the narrowest centred column that holds every text, button, flow image and icon (e.g. 1200px). Sections only add `padding-block`. |
+| **Backgrounds** | Section layers are anchored like Figma constraints: full-width ones stretch (`left: 0; width: 100%`), panels touching an edge stay on it (`width: calc(50% + 262px)`), others stay put relative to the centre. Background layers use `z-index: -1` inside their isolated section, so content needs no z-index. |
+| **Fluid sizes** | Text: no width or height; wrapping text keeps Figma's line length as `max-width`; short hugging labels `nowrap`; Figma line breaks are `<br>`; "Auto" line height is written as px. Images: `width: 100%; max-width: Wpx; height: auto; aspect-ratio`. Boxes in rows: `flex: 0 1 Wpx`. Only icons, decorations and overlapping layers keep fixed px. Geometry is snapped to whole pixels. |
+| **Rows and grids** | Equal, evenly spaced items become `display: grid; grid-template-columns: repeat(N, minmax(0, Wpx))` with `.l-grid-N` (2 columns below 1024px, 1 below 768px). Two items at both ends use `justify-content: space-between`; an item pinned to the right edge uses `margin-left: auto`; tight groups inside a row (menus, icon + label) stay a group. |
+| **Components** | Buttons are a global `.btn` (+ `.btn__label`): inline-flex, centred, padding from the design, `min-width` only when needed. Where a button sits is a separate section class (`.hero__action`). Identical declarations share one class. |
+| **Tokens** | `--container`, `--gutter`, colours, font families, spacing (`--space-N`, values used 3+ times), radii, shadows and font sizes. |
+| **Typography** | The most common paragraph style is written once on `body`; text classes only declare what differs. Headings are reset (`font-size/weight: inherit`) so the h1–h6 choice is semantic only. |
+| **Semantics** | Sections get ids. A row of 2–8 short labels becomes `<nav><ul role="list"><li><a>`; a thin top band holding it becomes `<header>`. Links whose label names a section or heading point to it (`href="#about-us"`), CTA buttons ("Get in touch", "I need help", "Book a call") point to the contact section, menu items matching a page name link to that page. Smooth scrolling and `scroll-margin-top`. Heading levels follow document order (no skipped levels; a logo above the h1 is a paragraph). Image alt text comes from the layer name, or the nearest heading when the name is generic ("Rectangle 250"). |
+| **Paint order** | Overlapping elements get the smallest z-index that keeps Figma's order (levels 1, 2, 3…), so identical items share classes. |
+| **Compositions** | Sections whose layers overlap across the full width keep the design-width stage; only those sections scale down (`[data-fit] { zoom }`) between 768px and the content width. |
+| **Code quality score** | New, next to fidelity. Structure (60): fixed widths, absolute positioning, headings, alt text. Responsive health (40): rendered at 390, 768 and 1280px — sideways scrolling, new text overlaps (overlaps already in the design are ignored), text off screen. Shown in the plugin. |
+
+Results: cleaning page 99.9 fidelity with **0 corrections on the first render**, code quality 94 (Excellent); services page 83 elements (TT Hoves cap), quality 92; Peachy Pup 91/94 (TT Hoves), quality 84; 2-page site 99.1, quality 89.
+
 ## Known limits (next steps)
 
 1. **Mobile frames:** read and paired with their page, but not yet merged into media queries (desktop/mobile element matching, FR-EXT-14). This is the next major step.
-2. **Inferred mobile layout** is basic (rows stack below 768 px). Sections that fall back to absolute positioning do not adapt.
+2. **Inferred mobile layout** is basic (rows stack, grids go to one column below 768 px). Background layers keep their desktop height and composition sections (overlapping layers) do not reflow on phones yet (v0.6).
 3. **Interactions and motion:** hover variants, Smart Animate and the Motion panel are not generated yet (FR-MOT).
 4. **Visual (non-geometry) fixes:** the loop corrects positions and sizes; wrong colours, effects or fonts are reported but not yet auto-fixed.
 5. **Semantics:** form fields drawn as rectangles stay `div`s; heading levels are inferred from size.
 6. **Real files tested:** two flat landing pages and a large illustrated page (Peachy Pup). Still needed: a file built with Auto Layout and components, and one with a mobile frame.
-7. **Links between pages:** nav items are not yet linked to the generated pages automatically.
+7. **Forms:** input fields drawn as rectangles are still `div`s (detection planned).
 8. **Between 768 px and the content width** the page scales like browser zoom (stepped every 32 px) rather than reflowing; a supplied tablet frame will replace this once breakpoint merging lands.

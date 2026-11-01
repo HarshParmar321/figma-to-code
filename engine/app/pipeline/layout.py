@@ -12,6 +12,7 @@ Steps per container:
 from __future__ import annotations
 
 import itertools
+import math
 
 from .ir import El, Page
 
@@ -42,10 +43,17 @@ CONTAINER_SHAPES = {"RECTANGLE", "FRAME", "COMPONENT", "INSTANCE", "SECTION"}
 
 
 def _can_contain(cand: El) -> bool:
-    """Rectangles, frames and image fills can hold content; ellipses, stars and vectors stay shapes."""
+    """Rectangles, frames and image fills can hold content; so can solid circles (badges, numbered
+    dots). Gradient glows, stars and vectors stay decorative shapes."""
     if cand.kind not in ("shape", "image"):
         return False
-    t = (cand.node or {}).get("type", "RECTANGLE")
+    node = cand.node or {}
+    t = node.get("type", "RECTANGLE")
+    if t == "ELLIPSE":
+        fills = [f for f in node.get("fills") or [] if f.get("visible", True)]
+        strokes = [f for f in node.get("strokes") or [] if f.get("visible", True)]
+        solid = all(f.get("type") == "SOLID" for f in fills)
+        return cand.kind == "image" or (solid and bool(fills or strokes))
     return t in CONTAINER_SHAPES
 
 
@@ -164,9 +172,11 @@ def xy_cut(items: list[El]) -> tuple[str, list[El]]:
         w = _wrap(group)
         if w.kind == "wrapper":
             sub_mode, sub_children = xy_cut(w.children)
-            if sub_mode == mode:
+            if sub_mode == mode and mode == "column":
                 children.extend(sub_children)  # same direction: splice instead of nesting
                 continue
+            # A tighter group inside a row (menu items, icon + label pairs) stays its own row: it is a
+            # visual unit (and often a <nav>).
             w.children, w.layout = sub_children, {"mode": sub_mode}
         children.append(w)
     return mode, children
@@ -203,7 +213,58 @@ def _recurse(e: El) -> None:
         layout_container(e)
 
 
+CONTENT_KINDS = ("text", "image", "svg")
+
+
+def snap_geometry(page: Page) -> None:
+    """Whole pixels everywhere (edges are rounded, so sizes never drift): clean CSS values."""
+    seen: set[int] = set()
+    for sec in page.sections:
+        for e in sec.walk():
+            if id(e) in seen:
+                continue
+            seen.add(id(e))
+            x0, y0, x1, y1 = round(e.x), round(e.y), round(e.right), round(e.bottom)
+            w = max(1, x1 - x0) if e.w >= 0.5 else e.w
+            h = max(1, y1 - y0) if e.h >= 0.5 else e.h
+            e.x, e.y, e.w, e.h = x0, y0, w, h
+
+
+def page_container(page: Page) -> tuple[float, float]:
+    """The centred content column: the narrowest symmetric band holding all text, buttons, flow images
+    and icons. Background layers and large decorative graphics may run outside it."""
+    W = page.width
+    left, right = W / 2, W / 2
+
+    def visit(e: El, in_layer: bool) -> None:
+        nonlocal left, right
+        for c in e.layers:
+            visit_one(c, True)
+        for c in e.children:
+            visit_one(c, in_layer)
+
+    def visit_one(c: El, in_layer: bool) -> None:
+        nonlocal left, right
+        texts = sum(1 for t in c.walk() if t.kind == "text")
+        content = (
+            c.kind == "text"
+            or (c.kind == "box" and texts == 1 and c.h <= 120)
+            or (c.kind == "image" and not in_layer)
+            or (c.kind == "svg" and max(c.w, c.h) <= 128)
+        )
+        if content and c.w < W * 0.95:
+            left, right = min(left, c.x), max(right, c.right)
+        visit(c, in_layer)
+
+    for sec in page.sections:
+        visit(sec, False)
+    half = math.ceil(max(W / 2 - left, right - W / 2))
+    width = min(W, 2 * half + int(W) % 2)  # same parity as the frame: the column starts on a whole pixel
+    return (W - width) / 2, width
+
+
 def layout_page(page: Page) -> Page:
+    snap_geometry(page)
     for sec in page.sections:
         if sec.auto:
             layout_container(sec)
@@ -230,4 +291,18 @@ def layout_page(page: Page) -> Page:
             inner.kind = "container"
             sec.children = [inner]
             sec.layout = {"mode": "column"}
+    cl, cw = page_container(page)
+    page.container = (cl, cw)
+    for sec in page.sections:
+        if sec.auto or len(sec.children) != 1 or sec.children[0].kind != "container":
+            continue
+        inner = sec.children[0]
+        items = inner.children if inner.layout.get("mode") != "absolute" else [inner]
+        fits = inner.layout.get("mode") != "absolute" and all(c.x >= cl - 3 and c.right <= cl + cw + 3 for c in items)
+        if fits:
+            # Content lives in the page container: positions become relative to its left edge.
+            inner.x, inner.w = cl, cw
+            inner.layout["page_container"] = True
+        else:
+            sec.layout["stage"] = True  # overlapping full-width composition: keep the design-width stage
     return page

@@ -126,23 +126,23 @@ def test_self_correction_repairs_a_broken_page(bundle, tmp_path):
     gen = generate_site([(page, "index.html")], bundle, tmp_path / "assets", tmp_path / "out")
     exp = gen.pages[0]["expectations"]
     css = tmp_path / "out" / "css" / "styles.css"
-    css.write_text(css.read_text() + '\n[data-figma-id="10:12"] { margin-top: 30px; margin-left: 17px; }\n')
+    ref = tmp_path / "assets" / "ref-desktop-1x.png"
     fixes: dict = {}
     with Renderer(os.environ.get("ENGINE_CHROMIUM_PATH")) as r:
-        first = verify(
-            tmp_path / "out", tmp_path / "f", page, exp, tmp_path / "assets" / "ref-desktop-1x.png", renderer=r
-        )
-        assert first["counts"]["geometryPass"] < first["counts"]["elements"]
+        clean = verify(tmp_path / "out", tmp_path / "f", page, exp, ref, renderer=r, write_images=False)
+        css.write_text(css.read_text() + '\n[data-figma-id="10:12"] { margin-top: 30px; margin-left: 17px; }\n')
+        first = verify(tmp_path / "out", tmp_path / "f", page, exp, ref, renderer=r)
+        assert first["counts"]["geometryPass"] < clean["counts"]["geometryPass"]
         for _ in range(6):
-            res = verify(tmp_path / "out", tmp_path / "f", page, exp, tmp_path / "assets" / "ref-desktop-1x.png",
-                         renderer=r, write_images=False)  # fmt: skip
+            res = verify(tmp_path / "out", tmp_path / "f", page, exp, ref, renderer=r, write_images=False)
             if not corr.step(res["measurements"], fixes):
                 break
             corr.write(tmp_path / "out", fixes)
-        final = verify(
-            tmp_path / "out", tmp_path / "f", page, exp, tmp_path / "assets" / "ref-desktop-1x.png", renderer=r
-        )
-    assert final["counts"]["geometryPass"] == final["counts"]["elements"]
+        final = verify(tmp_path / "out", tmp_path / "f", page, exp, ref, renderer=r)
+    # Everything the sabotage moved is back (the fixture's fonts are not installed, so a few text widths
+    # differ in every run; those are not position errors and are not counted here).
+    assert final["measurements"]["10:12"]["ok"] and final["measurements"]["10:13"]["ok"]
+    assert final["counts"]["geometryPass"] >= clean["counts"]["geometryPass"]
 
 
 # ----------------------------------------------------------------------------- background jobs

@@ -184,6 +184,13 @@ interface Conversion {
     corrections?: number;
     pages?: number;
   };
+  quality?: {
+    score: number;
+    band: string;
+    structure: number;
+    responsive: number | null;
+    issues: { severity: string; check: string; message: string }[];
+  };
 }
 
 async function generate(bundleId: string): Promise<Conversion> {
@@ -225,6 +232,13 @@ function renderResult(r: Conversion) {
     ? `<h2>Top issues</h2>${f.topIssues.slice(0, 5).map((i, idx) => `<div class="finding ${i.severity}" data-idx="${idx}"><strong>${escapeHtml(i.name ?? i.category)}</strong> ${escapeHtml(i.message)}</div>`).join('')}`
     : '';
   const notes = [...r.assumptions, ...r.warnings].map((n) => `<div class="note">• ${escapeHtml(n)}</div>`).join('');
+  const q = r.quality;
+  const qBand = q ? (q.score >= 90 ? 'Verified' : q.score >= 75 ? 'Close' : q.score >= 60 ? 'Needs' : 'Failed') : '';
+  const qualityHtml = q
+    ? `<h2>Code quality</h2><div class="score small"><b class="${qBand}">${q.score.toFixed(0)}</b><span class="band ${qBand}">${escapeHtml(q.band)}</span></div>
+       <div class="note">Clean structure ${q.structure.toFixed(0)}/60${q.responsive === null ? '' : ` · Works on phone, tablet and laptop ${q.responsive.toFixed(0)}/40`}</div>
+       ${q.issues.filter((i) => i.severity !== 'info').slice(0, 3).map((i) => `<div class="finding ${i.severity}">${escapeHtml(i.message)}</div>`).join('')}`
+    : '';
   const pagesHtml = r.pages && r.pages.length > 1
     ? `<h2>Pages</h2><table>${r.pages.map((p, i) => `<tr><td><a href="#" data-page="${i}">${escapeHtml(p.name)}</a></td><td class="v">${p.fidelity ? p.fidelity.score.toFixed(1) : '–'}</td></tr>`).join('')}</table>
        <div class="note">Shared components: ${r.components.length ? r.components.map(escapeHtml).join(', ') : 'none found'}</div>`
@@ -240,7 +254,7 @@ function renderResult(r: Conversion) {
     : '';
   resultEl.innerHTML = `<div class="result">${scoreHtml}
     <div class="row"><button id="open-preview">Open preview</button><button id="open-report" class="secondary">Report</button><button id="get-code" class="secondary">Download code</button></div>
-    ${pagesHtml}${fontsHtml}${notes}${issues}</div>`;
+    ${pagesHtml}${fontsHtml}${qualityHtml}${notes}${issues}</div>`;
   resultEl.querySelectorAll<HTMLElement>('a[data-page]').forEach((a) => {
     a.onclick = (ev) => {
       ev.preventDefault();

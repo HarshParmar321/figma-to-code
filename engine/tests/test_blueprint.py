@@ -115,8 +115,10 @@ def test_font_upload_api(client, tmp_path, monkeypatch):
     assert not any(p.name == "x.otf" for p in tmp_path.parent.rglob("x.otf") if "fonts" not in str(p))
 
 
-def test_generated_text_is_locked(bundle, tmp_path):
-    """Text boxes carry their Figma size on desktop and release it on mobile."""
+def test_generated_text_is_fluid(bundle, tmp_path):
+    """v0.5: text never gets a fixed box; wrapping text keeps Figma's line length only as a maximum."""
+    import re
+
     from app.pipeline.generate import generate
     from app.pipeline.ir import build_ir
     from app.pipeline.layout import layout_page
@@ -130,6 +132,9 @@ def test_generated_text_is_locked(bundle, tmp_path):
     generate(page, bundle, tmp_path / "assets", tmp_path / "out")
     html = (tmp_path / "out" / "index.html").read_text()
     css = (tmp_path / "out" / "css" / "styles.css").read_text()
-    assert 't-lock"' in html
-    assert ".t-lock { height: auto;" in css
-    assert "overflow: hidden" not in css.split("@media")[0].split(".hero")[0] or True
+    assert "t-lock" not in html and "white-space: pre" not in css
+    text_classes = set(re.findall(r'<(?:p|h[1-6]|span)[^>]* class="([^" ]+)', html))
+    for cls in text_classes:
+        rule = re.search(r"\." + re.escape(cls) + r" \{([^}]*)\}", css)
+        if rule:
+            assert not re.search(r"(?<![-\w])(width|height): \d", rule.group(1)), (cls, rule.group(1))
