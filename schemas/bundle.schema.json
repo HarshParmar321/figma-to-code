@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://figma-to-code.local/schemas/bundle.schema.json",
+  "title": "Plugin Bundle",
+  "description": "What the Figma plugin sends to the Engine: the selected frames serialized as a flat node map, plus variables, components, fonts and an asset manifest. Asset bytes are uploaded separately. Node objects are intentionally open (additionalProperties) because Figma exposes many properties; the Engine's extractor decides what it uses.",
+  "type": "object",
+  "required": ["schemaVersion", "source", "frames", "nodes", "assets"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "source": { "$ref": "#/$defs/source" },
+    "frames": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/frame" }
+    },
+    "nodes": {
+      "type": "object",
+      "description": "Flat map of node id -> node. Children are listed by id.",
+      "additionalProperties": { "$ref": "#/$defs/node" }
+    },
+    "variables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/variable" },
+      "default": []
+    },
+    "variableCollections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/variableCollection" },
+      "default": []
+    },
+    "components": {
+      "type": "object",
+      "description": "Main components referenced by instances in the selection, keyed by component node id.",
+      "additionalProperties": { "$ref": "#/$defs/component" },
+      "default": {}
+    },
+    "fonts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/font" },
+      "default": []
+    },
+    "assets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/asset" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" },
+      "default": []
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["fileName", "pluginVersion", "exportedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "fileKey": { "type": ["string", "null"], "description": "figma.fileKey; only available to private plugins, otherwise null." },
+        "fileName": { "type": "string" },
+        "pageId": { "type": "string" },
+        "pageName": { "type": "string" },
+        "pluginVersion": { "type": "string" },
+        "editorType": { "type": "string" },
+        "exportedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "required": ["role", "rootId", "name", "width", "height"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "enum": ["desktop", "tablet", "mobile"] },
+        "rootId": { "type": "string" },
+        "name": { "type": "string" },
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 },
+        "referenceAssets": {
+          "type": "array",
+          "description": "Asset ids of the rendered reference images of this frame (1x, 2x).",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "name", "type", "parentId", "children"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "parentId": { "type": ["string", "null"] },
+        "children": { "type": "array", "items": { "type": "string" } },
+        "visible": { "type": "boolean" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "absoluteBoundingBox": { "$ref": "#/$defs/rect" },
+        "layoutMode": { "enum": ["NONE", "HORIZONTAL", "VERTICAL", "GRID"] },
+        "reactions": { "type": "array" },
+        "motion": {
+          "description": "Motion panel data stored on the node with setPluginData('motion'). Parsed JSON.",
+          "type": ["object", "null"]
+        },
+        "exportAs": {
+          "description": "Set when the plugin exported this node as an asset (svg icon, image).",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "rect": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      }
+    },
+    "variable": {
+      "type": "object",
+      "required": ["id", "name", "resolvedType", "collectionId", "valuesByMode"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "resolvedType": { "enum": ["BOOLEAN", "COLOR", "FLOAT", "STRING"] },
+        "collectionId": { "type": "string" },
+        "valuesByMode": { "type": "object" },
+        "scopes": { "type": "array", "items": { "type": "string" } },
+        "codeSyntax": { "type": "object" }
+      }
+    },
+    "variableCollection": {
+      "type": "object",
+      "required": ["id", "name", "modes"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "defaultModeId": { "type": "string" },
+        "modes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["modeId", "name"],
+            "properties": { "modeId": { "type": "string" }, "name": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "key": { "type": ["string", "null"] },
+        "componentSetId": { "type": ["string", "null"] },
+        "componentSetName": { "type": ["string", "null"] },
+        "variantProperties": { "type": ["object", "null"] },
+        "remote": { "type": "boolean" }
+      }
+    },
+    "font": {
+      "type": "object",
+      "required": ["family", "style"],
+      "additionalProperties": false,
+      "properties": {
+        "family": { "type": "string" },
+        "style": { "type": "string" },
+        "usageCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["id", "kind", "format"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+        "kind": { "enum": ["reference", "image-fill", "svg", "raster-export"] },
+        "format": { "enum": ["PNG", "JPG", "SVG", "GIF", "WEBP"] },
+        "nodeId": { "type": ["string", "null"] },
+        "imageHash": { "type": ["string", "null"] },
+        "scale": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "byteLength": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": { "type": ["string", "null"] },
+        "code": { "type": "string" },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}
