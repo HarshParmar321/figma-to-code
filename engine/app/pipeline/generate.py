@@ -31,6 +31,11 @@ BUTTON_MAX_H = 80
 ICON_MAX = 64
 WEBP_QUALITY = 82
 MAX_IMAGE_EDGE = 2560
+PAINT_KINDS = {"text", "image", "svg", "raster", "shape", "box"}
+EDGE_MAX_VIEWPORT = 3840  # edge panels reach the screen edge up to this width
+MOBILE_MAX = 767  # inferred mobile layout below 768px
+FIT_GUTTER = 24.0  # breathing room left and right of the content when the layout starts scaling
+FIT_STEP = 32  # zoom steps (px of viewport) between the mobile breakpoint and the content width
 
 
 def slug(text: str, fallback: str = "section") -> str:
@@ -80,7 +85,9 @@ class Generator:
         self.rules: dict[str, dict[str, dict[str, str]]] = {}  # class -> {suffix: decls}
         self._class_by_sig: dict[tuple, str] = {}
         self._class_count: Counter = Counter()
-        self.image_uses: dict[str, tuple[float, float]] = {}
+        self.image_uses: dict[str, dict] = {}  # output stem -> {asset, crop, w, h}
+        self.fit_width = 0.0  # narrowest viewport that still shows all content at 100%
+        self._stack: set[int] = set()  # elements that need an explicit z-index (paint order)
         self.expect: list[dict] = []
         self.assumptions: list[str] = []
         self.warnings: list[str] = list(page.warnings) if page else []
@@ -200,7 +207,7 @@ class Generator:
         n = e.node or {}
         d: dict[str, str] = {}
         if e.kind in ("box", "shape", "section"):
-            d.update(background(n.get("fills")))
+            d.update(background(n.get("fills"), (e.w, e.h)))
             d.update(border(n))
         if e.kind in ("box", "shape", "image", "section"):
             d.update(radius(n))
@@ -208,11 +215,13 @@ class Generator:
         if e.kind == "text":
             d.update(effects(n, is_text=True))
         op = n.get("opacity", 1)
-        if isinstance(op, (int, float)) and op < 0.999:
+        # Exported SVG/PNG layers already carry the layer's own opacity (Figma bakes it in).
+        if isinstance(op, (int, float)) and op < 0.999 and e.kind not in ("svg", "raster"):
             d["opacity"] = f"{op:.3g}"
         if e.kind == "box" and e.asset:
-            d["background-image"] = f"url('../images/{self.image_file(e.asset, e.w, e.h)}')"
-            d["background-size"] = "cover"
+            crop = self.image_crop(e)
+            d["background-image"] = f"url('../images/{self.image_file(e.asset, e.w, e.h, crop)}')"
+            d["background-size"] = "100% 100%" if crop else "cover"
             d["background-position"] = "center"
         if (e.kind in ("box", "section")) and n.get("clipsContent"):
             d["overflow"] = "hidden"
@@ -224,7 +233,7 @@ class Generator:
         back = e.deco["node"] or {}
         d = {"content": "''", "position": "absolute", "inset": "0", "z-index": "-1", "pointer-events": "none"}
         d["transform"] = f"translate({px(e.deco['dx'])}, {px(e.deco['dy'])})"
-        d.update(background(back.get("fills")))
+        d.update(background(back.get("fills"), (e.w, e.h)))
         d.update(border(back))
         d.update(radius(back))
         return {"::before": d}
@@ -236,16 +245,41 @@ class Generator:
             return asset_id
         return self._by_hash.setdefault(digest, asset_id)
 
-    def image_file(self, asset_id: str, w: float, h: float) -> str:
+    def image_file(self, asset_id: str, w: float, h: float, crop: tuple | None = None) -> str:
+        """File name for an image use; `crop` = (x0, y0, x1, y1) window in 0..1 image coordinates."""
         asset_id = self.canonical(asset_id)
-        pw, ph = self.image_uses.get(asset_id, (0, 0))
-        self.image_uses[asset_id] = (max(pw, w), max(ph, h))
         meta = self.asset_meta.get(asset_id, {})
         if meta.get("format") == "SVG":
-            return f"{asset_id}.svg"
-        if meta.get("format") == "GIF":
-            return f"{asset_id}.gif"
-        return f"{asset_id}.webp"
+            crop = None
+        stem = asset_id
+        if crop:
+            stem = f"{asset_id}-c{abs(hash(tuple(round(c, 4) for c in crop))) % 10**8:08d}"
+        use = self.image_uses.setdefault(stem, {"asset": asset_id, "crop": crop, "w": 0.0, "h": 0.0})
+        use["w"], use["h"] = max(use["w"], w), max(use["h"], h)
+        if meta.get("format") == "SVG":
+            return f"{stem}.svg"
+        if meta.get("format") == "GIF" and not crop:
+            return f"{stem}.gif"
+        return f"{stem}.webp"
+
+    @staticmethod
+    def image_crop(e: El) -> tuple[float, float, float, float] | None:
+        """Visible window of a CROP image fill (Figma's imageTransform maps the layer onto the image)."""
+        for p in (e.node or {}).get("fills") or []:
+            if p.get("type") != "IMAGE" or not p.get("visible", True) or p.get("scaleMode") != "CROP":
+                continue
+            t = p.get("imageTransform")
+            try:
+                (a, b, c), (d, e_, f) = t
+            except (TypeError, ValueError):
+                return None
+            if abs(b) > 1e-3 or abs(d) > 1e-3 or a <= 0 or e_ <= 0:
+                return None  # rotated crops are not supported; fall back to cover
+            x0, y0, x1, y1 = c, f, c + a, f + e_
+            if x0 <= 1e-3 and y0 <= 1e-3 and x1 >= 0.999 and y1 >= 0.999:
+                return None
+            return x0, y0, x1, y1
+        return None
 
     # ------------------------------------------------------------------ layout
     def flow_css(
@@ -351,7 +385,8 @@ class Generator:
             tag = "img"
             icon = e.kind == "svg" and max(e.w, e.h) <= ICON_MAX
             role = "icon" if icon else {"svg": "graphic", "raster": "illustration"}.get(e.kind, "image")
-            f = self.image_file(e.asset, e.w, e.h)
+            crop = self.image_crop(e) if e.kind == "image" else None
+            f = self.image_file(e.asset, e.w, e.h, crop)
             bx, by, bw, bh = self._draw_box(e)
             alt = "" if e.kind in ("svg", "raster") else html.escape(e.name)
             attrs += [f'src="images/{f}"', f'alt="{alt}"', f'width="{round(bw)}"', f'height="{round(bh)}"']
@@ -363,7 +398,7 @@ class Generator:
                     (p.get("scaleMode") for p in (e.node or {}).get("fills", []) if p.get("type") == "IMAGE"),
                     "FILL",
                 )
-                main["object-fit"] = {"FIT": "contain", "TILE": "none"}.get(mode, "cover")
+                main["object-fit"] = "fill" if crop else {"FIT": "contain", "TILE": "none"}.get(mode, "cover")
             main.update(self.visual(e))
             self._expect({"id": e.node["id"], "kind": e.kind, "box": [bx, by, bw, bh], "asset": f})
         elif e.kind == "shape":
@@ -412,50 +447,86 @@ class Generator:
                     role = "layer-group"
 
             children = e.children
+            box_css = main  # where padding and flow go: the element itself, or a section's stage
+            stage_css: dict[str, str] | None = None
+            if e.kind == "section":
+                # The section spans the viewport (backgrounds stretch); its content sits on a stage of the
+                # design's width centred in it, so nothing drifts off-centre on wider or narrower screens.
+                W = self.page.width
+                stage_css = {
+                    "position": "relative",
+                    "width": px(W),
+                    "margin-left": f"calc(50% - {px(W / 2)})",
+                    "min-height": px(e.h),
+                }
+                main["isolation"] = "isolate"
+                box_css = stage_css
             if e.kind == "section" and len(children) == 1 and children[0].kind == "container":
                 # Band section: one centred container carries the content; the section only pads it.
                 pad = (children[0].y - e.y, 0, e.bottom - children[0].bottom, 0)
                 pad = tuple(max(0.0, p) for p in pad)
                 flow, per_child = {"display": "flex", "flex-direction": "column"}, [{} for _ in children]
-                main["padding"] = f"{px(pad[0])} 0 {px(pad[2])}"
+                box_css["padding"] = f"{px(pad[0])} 0 {px(pad[2])}"
             else:  # boxes, wrappers and frame sections (Auto Layout or not) lay out their children directly
                 pad = self.padding(e, children)
                 if any(pad):
-                    main["padding"] = " ".join(px(p) for p in pad)
+                    box_css["padding"] = " ".join(px(p) for p in pad)
                 flow, per_child = self.flow_css(e, children, pad)
                 flow.pop("__order__", None)
-            main.update(flow)
+                if e.kind == "section":
+                    flow.pop("width", None)
+                    flow.pop("height", None)
+            box_css.update(flow)
             if e.layout.get("mode") == "row":
                 attrs.append('data-layout="row"')
 
-            parts = []
+            parts: list[str] = []
+            stage_parts: list[str] = []
+            cdepth = depth + 2 if stage_css is not None else depth + 1
             measurable = (e.kind == "box" and e.node is not None) or e.kind == "section"
             if measurable:
                 self._anc.append(self.expect[-1]["id"] if e.kind == "section" else e.node["id"])
             if e.layers:
-                main["position"] = main.get("position", "relative")
-                if main["position"] == "static":
+                if main.get("position", "static") == "static":
                     main["position"] = "relative"
                 for layer in sorted(e.layers, key=lambda x: x.z):
+                    full = e.kind == "section" and self._full_bleed(layer)
                     lp = {
                         "position": "absolute",
-                        "left": px(layer.x - e.x),
+                        "left": "0" if full else px(layer.x - e.x),
                         "top": px(layer.y - e.y),
-                        "z-index": "0",
                     }
-                    parts.append(self.render(layer, lp, depth + 1))
-                for cd in per_child:
-                    cd.setdefault("position", "relative")
-                    cd["z-index"] = "1"
+                    if full:
+                        lp["width"] = "100%"
+                        if layer.kind in ("svg", "raster"):
+                            lp["object-fit"] = "cover"
+                    if full or stage_css is None:
+                        parts.append(self.render(layer, lp, depth + 1))
+                    else:
+                        stage_parts.append(self.render(layer, lp, cdepth))
             for c, cd in zip(children, per_child, strict=True):
-                parts.append(self.render(c, cd, depth + 1))
+                (stage_parts if stage_css is not None else parts).append(self.render(c, cd, cdepth))
             if measurable:
                 self._anc.pop()
+            if stage_css is not None:
+                stage_cls = self.class_for("stage", {"": stage_css})
+                sind = "  " * (depth + 1)
+                stage = f'{sind}<div class="{stage_cls} l-stage">\n' + "\n".join(stage_parts) + f"\n{sind}</div>"
+                parts = parts + [stage]
             inner = "\n" + "\n".join(parts) + "\n" + ind
 
         main.update(placement)
+        if id(e) in self._stack:
+            # Overlaps something outside its own box: paint exactly where Figma paints it.
+            main["z-index"] = str(e.z + 1)
+            if main.get("position", "static") == "static":
+                main["position"] = "relative"
         if e.bleed:
             self._apply_bleed(e, main)
+        if e.mask:
+            main.update(self.mask_css(e))
+        if e.kind in ("box", "shape"):
+            self._extend_to_edge(e, main)
         cls = self.class_for(role, css)
         utility = (" l-row" if e.layout.get("mode") == "row" else "") + (" t-lock" if e.kind == "text" else "")
         extra = ' class="' + cls + utility + '"'
@@ -463,6 +534,105 @@ class Generator:
         if tag == "img":
             return f"{ind}<img{extra}{a}>"
         return f"{ind}<{tag}{extra}{a}>{inner}</{tag}>"
+
+    @staticmethod
+    def stacking(sec: El) -> set[int]:
+        """Elements that overlap another element outside their own ancestry.
+
+        They get z-index = Figma paint order, so the browser stacks them exactly like Figma, wherever
+        layout inference put them in the DOM. Wrappers never get a z-index, so they stay transparent
+        to stacking; boxes that do get one keep their children on top of them, as in Figma.
+        """
+        painted: list[tuple[El, frozenset]] = []
+
+        def visit(e: El, chain: frozenset) -> None:
+            for c in e.layers + e.children:
+                if c.kind in PAINT_KINDS:
+                    painted.append((c, chain))
+                visit(c, chain | {id(c)})
+
+        visit(sec, frozenset())
+        painted.sort(key=lambda t: t[0].x)
+        need: set[int] = set()
+        for i, (a, chain_a) in enumerate(painted):
+            for b, chain_b in painted[i + 1 :]:
+                if b.x >= a.right:
+                    break
+                if id(a) in chain_b or id(b) in chain_a or not a.intersects(b):
+                    continue
+                need.add(id(a))
+                need.add(id(b))
+        return need
+
+    def _extend_to_edge(self, e: El, d: dict[str, str]) -> None:
+        """A solid panel touching the frame's left or right edge keeps touching the screen edge on wider
+        screens. Drawn as box-shadow copies: they never change layout or scroll width, and at the design
+        width they sit outside the viewport."""
+        W = self.page.width
+        bg = d.get("background-color")
+        left, right = e.x <= 1, e.right >= W - 1
+        if not bg or (left and right) or not (left or right) or e.w < 40 or e.mask or "border-radius" in d:
+            return
+        reach = (EDGE_MAX_VIEWPORT - W) / 2
+        n = max(1, math.ceil(reach / e.w))
+        sign = -1 if left else 1
+        copies = [f"{px(sign * e.w * (i + 1))} 0 0 0 {bg}" for i in range(n)]
+        d["box-shadow"] = ", ".join(([d["box-shadow"]] if d.get("box-shadow") else []) + copies)
+
+    def _full_bleed(self, e: El) -> bool:
+        """A section layer spanning the whole frame width stretches with the viewport."""
+        return e.x <= 1 and e.right >= self.page.width - 1 and not e.bleed
+
+    def _image_data_uri(self, asset_id: str, w: float, h: float, limit: int = 400_000) -> str | None:
+        """Small raster as a data URI (CSS masks refuse file:// images)."""
+        from io import BytesIO
+
+        from PIL import Image
+
+        meta = self.asset_meta.get(asset_id, {})
+        ext = {"PNG": "png", "JPG": "jpg", "WEBP": "webp", "GIF": "gif"}.get(meta.get("format", "PNG"), "png")
+        src = self.asset_dir / f"{asset_id}.{ext}"
+        if not src.exists():
+            return None
+        with Image.open(src) as im:
+            tw = max(1, min(im.width, math.ceil(w * 2)))
+            if tw < im.width:
+                im = im.resize((tw, max(1, round(im.height * tw / im.width))), Image.LANCZOS)
+            buf = BytesIO()
+            im.convert("RGBA").save(buf, "PNG", optimize=True)
+        data = buf.getvalue()
+        if len(data) > limit:
+            return None
+        return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+    def mask_css(self, e: El) -> dict[str, str]:
+        """Figma mask → CSS: image masks become mask-image, shapes become clip-path."""
+        m = e.mask or {}
+        mx, my, mw, mh = m.get("box", (e.x, e.y, e.w, e.h))
+        ox, oy, ow, oh = self._draw_box(e)
+        dx, dy = mx - ox, my - oy
+        if m.get("kind") == "image":
+            uri = self._image_data_uri(m["asset"], mw, mh)
+            src = f'url("{uri}")' if uri else f"url('../images/{self.image_file(m['asset'], mw, mh)}')"
+            d = {
+                "-webkit-mask-image": src,
+                "mask-image": src,
+                "-webkit-mask-size": f"{px(mw)} {px(mh)}",
+                "mask-size": f"{px(mw)} {px(mh)}",
+                "-webkit-mask-position": f"{px(dx)} {px(dy)}",
+                "mask-position": f"{px(dx)} {px(dy)}",
+                "-webkit-mask-repeat": "no-repeat",
+                "mask-repeat": "no-repeat",
+            }
+            if m.get("maskType") == "LUMINANCE":
+                d["mask-mode"] = "luminance"
+            return d
+        if m.get("kind") == "ellipse":
+            return {"clip-path": f"ellipse({px(mw / 2)} {px(mh / 2)} at {px(dx + mw / 2)} {px(dy + mh / 2)})"}
+        right, bottom = (ox + ow) - (mx + mw), (oy + oh) - (my + mh)
+        rad = radius(m.get("node") or {}).get("border-radius")
+        inset = f"inset({px(dy)} {px(right)} {px(bottom)} {px(dx)}" + (f" round {rad}" if rad else "") + ")"
+        return {"clip-path": inset}
 
     def text_css(self, e: El) -> dict[str, str]:
         n = e.node or {}
@@ -526,7 +696,7 @@ class Generator:
         )
 
     def expect_box(self, e: El) -> None:
-        bg = background((e.node or {}).get("fills"))
+        bg = background((e.node or {}).get("fills"), (e.w, e.h))
         self._expect(
             {
                 "id": e.node["id"],
@@ -543,7 +713,8 @@ class Generator:
         img_dir = out_dir / "images"
         img_dir.mkdir(parents=True, exist_ok=True)
         written = {}
-        for asset_id, (w, _h) in self.image_uses.items():
+        for stem, use in self.image_uses.items():
+            asset_id, crop, w = use["asset"], use["crop"], use["w"]
             meta = self.asset_meta.get(asset_id, {})
             fmt = meta.get("format", "PNG")
             ext = {"PNG": "png", "JPG": "jpg", "SVG": "svg", "GIF": "gif", "WEBP": "webp"}.get(fmt, "bin")
@@ -551,19 +722,29 @@ class Generator:
             if not src.exists():
                 self.warnings.append(f"Asset file missing: {src.name}")
                 continue
-            if fmt in ("SVG", "GIF"):
-                dst = img_dir / f"{asset_id}.{ext}"
+            if fmt == "SVG" or (fmt == "GIF" and not crop):
+                dst = img_dir / f"{stem}.{ext}"
                 shutil.copyfile(src, dst)
             else:
-                dst = img_dir / f"{asset_id}.webp"
+                dst = img_dir / f"{stem}.webp"
                 with Image.open(src) as im:
+                    if crop:
+                        x0, y0, x1, y1 = crop
+                        box = (
+                            max(0, round(x0 * im.width)),
+                            max(0, round(y0 * im.height)),
+                            min(im.width, round(x1 * im.width)),
+                            min(im.height, round(y1 * im.height)),
+                        )
+                        if box[2] > box[0] and box[3] > box[1]:
+                            im = im.crop(box)
                     target_w = min(im.width, MAX_IMAGE_EDGE, max(1, math.ceil(w * 2)))
                     if target_w < im.width:
                         im = im.resize((target_w, max(1, round(im.height * target_w / im.width))), Image.LANCZOS)
                     if im.mode not in ("RGB", "RGBA"):
                         im = im.convert("RGBA")
                     im.save(dst, "WEBP", quality=WEBP_QUALITY, method=4)
-            written[asset_id] = dst
+            written[stem] = dst
         return written
 
     def font_usage(self) -> dict[str, set[tuple[int, str]]]:
@@ -660,6 +841,9 @@ class Generator:
         self.assign_roles()
         body_parts = []
         prev_bottom = 0.0
+        self._stack = set()
+        for sec in page.sections:
+            self._stack |= self.stacking(sec)
         for sec in page.sections:
             self.section_slug = sec.role or "section"
             # Sections stack in normal flow: keep any gap (or overlap) the design has between them.
@@ -670,6 +854,7 @@ class Generator:
             if sec.component and sec.component not in self.components:
                 self.components[sec.component] = html_part
             body_parts.append(html_part)
+        self.fit_width = max(self.fit_width, self.content_width(page))
         return {
             "name": page.name,
             "file": filename,
@@ -681,6 +866,41 @@ class Generator:
             "height": page.height,
             "background": background(page.background).get("background-color", "#ffffff"),
         }
+
+    @staticmethod
+    def content_width(page: Page, gutter: float = FIT_GUTTER) -> float:
+        """Narrowest centred viewport that shows every piece of content (text, images, icons, buttons).
+
+        Decorative shapes and backgrounds may run to the frame edges; they are allowed to be cut off.
+        """
+        W = page.width
+        left, right = W / 2, W / 2
+        for sec in page.sections:
+            for e in sec.walk():
+                content = e.kind in ("text", "image", "svg") or (e.kind == "box" and e.role == "button")
+                if not content or e.w >= W * 0.95:
+                    continue
+                left, right = min(left, e.x), max(right, e.right)
+        half = max(W / 2 - left, right - W / 2)
+        return min(W, 2 * half + 2 * gutter)
+
+    def fit_css(self, design_width: float) -> str:
+        """Stepped zoom between the mobile breakpoint and the content width: nothing is ever cut off."""
+        fit = math.ceil(self.fit_width or design_width)
+        if fit <= MOBILE_MAX + 1:
+            return ""
+        self.assumptions.append(
+            "Content stays centred on any screen; between 768px and "
+            f"{fit}px the layout scales down so nothing is cut off."
+        )
+        lines = [f"/* Below {fit}px the layout scales down (like the browser's zoom) so all content stays visible. */"]
+        top = fit
+        while top > MOBILE_MAX + 1:
+            low = max(MOBILE_MAX + 1, top - FIT_STEP)
+            query = f"(min-width: {low}px) and (max-width: {top - 0.02:.2f}px)"
+            lines.append(f"@media {query} {{ main {{ zoom: {low / fit:.4f}; }} }}")
+            top = low
+        return "\n".join(lines)
 
     def finish(self, out_dir: Path, pages: list[dict]) -> Output:
         root_css, rules_css = self.css_text()
@@ -700,6 +920,7 @@ class Generator:
         responsive = (
             "/* Inferred mobile layout: rows stack below 768px (no mobile frame was supplied). */\n"
             "@media (max-width: 767px) {\n"
+            "  .l-stage { width: auto; margin-left: 0; }\n"
             "  .l-row { flex-direction: column; flex-wrap: wrap; align-items: center; }\n"
             "  .l-row > * { margin-left: 0; }\n"
             "  .t-lock { height: auto; white-space: pre-wrap; }\n"
@@ -708,7 +929,8 @@ class Generator:
         )
         if not any(f["role"] == "mobile" for f in self.bundle["frames"]):
             self.assumptions.append("No mobile frame: a simple stacked mobile layout was inferred below 768px.")
-        css = "\n\n".join(p for p in [faces, root_css, base, rules_css, responsive] if p) + "\n"
+        fit = self.fit_css(pages[0]["width"] if pages else 1440)
+        css = "\n\n".join(p for p in [faces, root_css, base, rules_css, fit, responsive] if p) + "\n"
         site = html.escape(self.bundle["source"].get("fileName", "Site"))
         font_link = f'  <link rel="stylesheet" href="{html.escape(google_href)}">\n' if google_href else ""
         corrections = out_dir / "css" / "corrections.css"

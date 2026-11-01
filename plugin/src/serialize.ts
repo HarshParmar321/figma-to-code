@@ -1,6 +1,6 @@
 // Serializes a Figma node subtree into the flat bundle node map.
 import type { BundleNode, Diagnostic, FontRef } from './types.ts';
-import { ILLUSTRATION_PART_TYPES, VECTOR_TYPES, vectorGroupExport } from './util.ts';
+import { ILLUSTRATION_PART_TYPES, VECTOR_TYPES, vectorGroupExport, maskGroupExport } from './util.ts';
 
 export const MAX_NODES = 25000;
 const CONTAINER_TYPES = new Set(['FRAME', 'GROUP', 'INSTANCE', 'COMPONENT', 'BOOLEAN_OPERATION']);
@@ -71,6 +71,12 @@ function hasImageFill(node: SceneNode): boolean {
 function containerExport(node: SceneNode): 'svg' | 'png' | null {
   if (!CONTAINER_TYPES.has(node.type) || !('findAll' in node)) return null;
   const parent = node as ChildrenMixin & SceneNode;
+  const hasMask = parent.children.some((c) => c.visible && 'isMask' in c && (c as BlendMixin).isMask);
+  if (hasMask) {
+    const hasText = !!parent.findOne((n) => n.type === 'TEXT' && n.visible);
+    const masked = maskGroupExport(node.type, true, hasText);
+    if (masked) return masked;
+  }
   const offender = parent.findOne((n) => !ILLUSTRATION_PART_TYPES.has(n.type) || hasImageFill(n));
   if (offender || hasImageFill(node)) return null;
   const types = parent.findAll((n) => n.visible).map((n) => n.type);
@@ -248,9 +254,16 @@ export async function serializeTree(root: SceneNode, ctx: SerializeContext): Pro
       await new Promise((r) => setTimeout(r, 0)); // yield so the UI stays responsive
     }
     if ('children' in node) {
-      const childInsideSvg = insideSvg || out.exportAs === 'svg' || out.exportAs === 'png';
+      if (out.exportAs === 'svg' || out.exportAs === 'png') {
+        // Exported as one image: its inner layers are not needed (a 10,000-piece illustration would
+        // otherwise make the bundle huge and slow). Only their count is kept for the design check.
+        const parent = node as SceneNode & ChildrenMixin;
+        out.exportedLayers = parent.findAll(() => true).length;
+        out.children = [];
+        continue;
+      }
       for (let i = node.children.length - 1; i >= 0; i--) {
-        stack.push({ node: node.children[i], parentId: node.id, insideSvg: childInsideSvg });
+        stack.push({ node: node.children[i], parentId: node.id, insideSvg });
       }
     }
   }

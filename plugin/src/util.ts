@@ -82,6 +82,16 @@ export function vectorGroupExport(type: string, descendantTypes: string[], hasIm
   return vectors > RASTER_THRESHOLD ? 'png' : 'svg';
 }
 
+/**
+ * Mask groups (a photo or texture clipped by a shape or an image) are exported as one 2x PNG so the
+ * result is exactly what Figma draws. Groups with text inside stay live HTML; the Engine applies the
+ * mask with CSS instead.
+ */
+export function maskGroupExport(type: string, hasMaskChild: boolean, hasText: boolean): 'png' | null {
+  if (!ILLUSTRATION_CONTAINERS.has(type) || type === 'BOOLEAN_OPERATION') return null;
+  return hasMaskChild && !hasText ? 'png' : null;
+}
+
 /** Validates the role assignment chosen in the UI. Returns an error message or null. */
 export function validateRoles(roles: Record<string, FrameRole>): string | null {
   const values = Object.values(roles);

@@ -45,34 +45,83 @@ def is_italic(style: str) -> bool:
     return "italic" in style.lower() or "oblique" in style.lower()
 
 
-def _gradient(p: dict) -> str | None:
+def _inverse_affine(t) -> tuple[float, float, float, float, float, float] | None:
+    """Inverse of Figma's 2x3 gradientTransform (element space → gradient space)."""
+    try:
+        (a, b, c), (d, e, f) = t
+    except (TypeError, ValueError):
+        return None
+    det = a * e - b * d
+    if abs(det) < 1e-9:
+        return None
+    ia, ib, id_, ie = e / det, -b / det, -d / det, a / det
+    return ia, ib, -(ia * c + ib * f), id_, ie, -(id_ * c + ie * f)
+
+
+def _apply(m, x: float, y: float) -> tuple[float, float]:
+    return m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5]
+
+
+def _gradient(p: dict, size: tuple[float, float] | None = None) -> str | None:
     stops = p.get("gradientStops") or []
     if not stops:
         return None
-    parts = ", ".join(f"{color(s['color'], p.get('opacity', 1))} {num(s['position'] * 100)}%" for s in stops)
+    op = p.get("opacity", 1)
+    positions = [float(s["position"]) for s in stops]
     t = p.get("gradientTransform")
+    inv = _inverse_affine(t) if t else None
+    w, h = size if size else (100.0, 100.0)
+
+    def parts(pos: list[float]) -> str:
+        return ", ".join(f"{color(s['color'], op)} {num(q * 100)}%" for s, q in zip(stops, pos, strict=True))
+
     if p["type"] == "GRADIENT_LINEAR":
-        angle = 180.0
-        if t and len(t) == 2:
-            # gradientTransform maps the element to gradient space; the gradient runs along its x axis.
-            a, b = t[0][0], t[1][0]
-            angle = (math.degrees(math.atan2(b, a)) + 90) % 360
-        return f"linear-gradient({num(angle)}deg, {parts})"
+        if inv is None:
+            return f"linear-gradient(180deg, {parts(positions)})"
+        # The gradient runs from (0, .5) to (1, .5) in gradient space; map both ends to pixels.
+        x0, y0 = _apply(inv, 0, 0.5)
+        x1, y1 = _apply(inv, 1, 0.5)
+        x0, y0, x1, y1 = x0 * w, y0 * h, x1 * w, y1 * h
+        dx, dy = x1 - x0, y1 - y0
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return f"linear-gradient(180deg, {parts(positions)})"
+        theta = math.atan2(dx, -dy)  # CSS: 0deg points up, clockwise
+        ux, uy = math.sin(theta), -math.cos(theta)
+        length = abs(w * ux) + abs(h * uy)
+        sx, sy = w / 2 - ux * length / 2, h / 2 - uy * length / 2
+        t0 = ((x0 - sx) * ux + (y0 - sy) * uy) / length
+        t1 = ((x1 - sx) * ux + (y1 - sy) * uy) / length
+        mapped = [t0 + q * (t1 - t0) for q in positions]
+        return f"linear-gradient({num(math.degrees(theta) % 360)}deg, {parts(mapped)})"
     if p["type"] in ("GRADIENT_RADIAL", "GRADIENT_DIAMOND"):
-        return f"radial-gradient(circle, {parts})"
+        if inv is None:
+            return f"radial-gradient(ellipse 50% 50% at 50% 50%, {parts(positions)})"
+        # Gradient space: centre (.5, .5), radius .5 along both axes.
+        cx, cy = _apply(inv, 0.5, 0.5)
+        ax = (inv[0] * 0.5, inv[3] * 0.5)  # gradient x axis (radius) in element space
+        ay = (inv[1] * 0.5, inv[4] * 0.5)
+        rx = math.hypot(ax[0] * w, ay[0] * w) / w * 100
+        ry = math.hypot(ax[1] * h, ay[1] * h) / h * 100
+        return (
+            f"radial-gradient(ellipse {num(rx)}% {num(ry)}% at {num(cx * 100)}% {num(cy * 100)}%, {parts(positions)})"
+        )
     if p["type"] == "GRADIENT_ANGULAR":
-        return f"conic-gradient({parts})"
+        cx, cy = _apply(inv, 0.5, 0.5) if inv else (0.5, 0.5)
+        return f"conic-gradient(from 90deg at {num(cx * 100)}% {num(cy * 100)}%, {parts(positions)})"
     return None
 
 
-def background(paints) -> dict[str, str]:
-    """Solid and gradient fills → background. Image fills are handled as <img> elements."""
+def background(paints, size: tuple[float, float] | None = None) -> dict[str, str]:
+    """Solid and gradient fills → background. Image fills are handled as <img> elements.
+
+    `size` (w, h) lets gradients map Figma's handles exactly; without it they are approximated.
+    """
     layers = []
     for p in reversed(visible_paints(paints)):  # Figma lists bottom → top; CSS lists top → bottom
         if p["type"] == "SOLID":
             layers.append(color(p["color"], p.get("opacity", 1)))
         elif p["type"].startswith("GRADIENT"):
-            g = _gradient(p)
+            g = _gradient(p, size)
             if g:
                 layers.append(g)
     if not layers:

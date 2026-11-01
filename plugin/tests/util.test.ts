@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   assetIdFor, collectVariableAliasIds, detectImageFormat, isIconCandidate, suggestRole, validateRoles,
-  vectorGroupExport, RASTER_THRESHOLD, pageName,
+  vectorGroupExport, maskGroupExport, RASTER_THRESHOLD, pageName,
 } from '../src/util.ts';
 
 test('suggestRole by frame width', () => {
@@ -67,4 +67,12 @@ test('vectorGroupExport collapses illustrations of any size', () => {
   assert.equal(vectorGroupExport('TEXT', ['VECTOR'], false), null, 'not a container');
   const many = Array(RASTER_THRESHOLD + 1).fill('VECTOR');
   assert.equal(vectorGroupExport('GROUP', many, false), 'png', 'very complex illustration → PNG');
+});
+
+test('maskGroupExport flattens mask groups unless they hold text', () => {
+  assert.equal(maskGroupExport('GROUP', true, false), 'png');
+  assert.equal(maskGroupExport('FRAME', true, false), 'png');
+  assert.equal(maskGroupExport('GROUP', true, true), null); // text stays live; the Engine masks with CSS
+  assert.equal(maskGroupExport('GROUP', false, false), null);
+  assert.equal(maskGroupExport('TEXT', true, false), null);
 });

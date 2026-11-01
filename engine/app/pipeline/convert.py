@@ -18,6 +18,7 @@ from .ir import build_pages, site_pages
 from .layout import layout_page
 
 MAX_ROUNDS = 6
+CHECK_BUDGET_S = 120.0  # correction rounds stop after this much checking time (per conversion)
 Progress = Callable[[str], None]
 
 
@@ -111,6 +112,7 @@ def convert(
         try:
             with Renderer(chromium_path) as renderer:
                 fixes: dict[str, dict] = {}
+                check_start = time.monotonic()
                 for i, (p, file, gp) in enumerate(zip(pages, files, gen.pages, strict=True)):
                     ref = _reference(bundle_dir, p.frame, assets)
                     label = f"{p.name} ({i + 1}/{len(pages)})" if len(pages) > 1 else p.name
@@ -121,7 +123,8 @@ def convert(
                     first_score, rounds, fid = None, 0, None
                     for rnd in range(max_rounds + 1):
                         say(f"Checking {label} against the design" + (f" (correction round {rnd})" if rnd else ""))
-                        final = rnd == max_rounds
+                        over = time.monotonic() - check_start > CHECK_BUDGET_S
+                        final = rnd == max_rounds or over
                         fid = verify(out_dir, pdir, p, gp["expectations"], ref, renderer=renderer,
                                      html_file=file, write_images=False)  # fmt: skip
                         first_score = fid["score"] if first_score is None else first_score
@@ -129,6 +132,10 @@ def convert(
                             break
                         rounds += 1
                         corr.write(out_dir, fixes)
+                    if not renderer.ready:
+                        result["warnings"].append(f"{p.name}: some images or fonts took over 20 s to load.")
+                    if time.monotonic() - check_start > CHECK_BUDGET_S:
+                        result["warnings"].append("Correction rounds stopped early: the time budget was reached.")
                     write_compare_images(ref, pdir / "render.png", pdir)
                     back = "../../output/" if len(pages) > 1 else "../output/"
                     write_report_html(fid, pdir, f"{p.name} · {bundle['source'].get('fileName', 'Design')}",

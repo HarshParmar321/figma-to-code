@@ -42,6 +42,7 @@ class El:
     bleed: tuple[float, float, float, float] | None = None  # SVG export area beyond the box (t, r, b, l)
     overlay: bool = False  # section paints above its neighbours' background layers (split-out header)
     component: str | None = None  # shared component name when the section repeats across pages
+    mask: dict | None = None  # Figma mask applied to this element (shape clip or image alpha)
 
     @property
     def right(self) -> float:
@@ -97,6 +98,21 @@ class IRBuilder:
         self.image_assets = {a["imageHash"]: a["id"] for a in bundle["assets"] if a.get("imageHash")}
         self._z = itertools.count()
         self.warnings: list[str] = []
+        # A visible mask layer clips every sibling painted above it (until the end of its parent).
+        self.masked_by: dict[str, str] = {}
+        for n in self.nodes.values():
+            if n.get("insideSvg"):
+                continue
+            current = None
+            for cid in n.get("children", []):
+                c = self.nodes.get(cid)
+                if c is None:
+                    continue
+                if c.get("isMask") and c.get("visible", True):
+                    current = cid
+                elif current:
+                    self.masked_by[cid] = current
+        self._mask_cache: dict[str, dict | None] = {}
 
     # --- geometry
     def box(self, node: dict, root: dict) -> tuple[float, float, float, float] | None:
@@ -141,6 +157,19 @@ class IRBuilder:
 
     def flatten(self, node: dict, root: dict) -> list[El]:
         """Returns the elements a node contributes to its parent's flow."""
+        if node.get("isMask") and node.get("visible", True) and not node.get("exportAs"):
+            return []  # a mask is not drawn itself
+        items = self._flatten(node, root)
+        mid = self.masked_by.get(node["id"])
+        if mid and items:
+            if mid not in self._mask_cache:
+                self._mask_cache[mid] = self._mask(self.nodes[mid], root)
+            m = self._mask_cache[mid]
+            for e in items:
+                e.mask = e.mask or m
+        return items
+
+    def _flatten(self, node: dict, root: dict) -> list[El]:
         if not node.get("visible", True) or node.get("opacity", 1) == 0 or node.get("insideSvg"):
             return []
         t = node["type"]
@@ -168,26 +197,41 @@ class IRBuilder:
                 return [e] if e else []
             return []
         if t == "GROUP" or t == "BOOLEAN_OPERATION":
-            return [e for c in node.get("children", []) if c in self.nodes for e in self.flatten(self.nodes[c], root)]
+            return self._flatten_children([self.nodes[c] for c in node.get("children", []) if c in self.nodes], root)
         if t in FRAME_TYPES:
             kids = [self.nodes[c] for c in node.get("children", []) if c in self.nodes]
             if node.get("layoutMode") in AUTO_LAYOUT:
                 e = self.el(node, root, "box", auto=True, asset=self._image_asset(node))
                 if not e:
                     return []
-                for k in kids:
-                    e.children.extend(self.flatten(k, root))
+                e.children.extend(self._flatten_children(kids, root))
                 return [e]
             if self._draws(node) or (node.get("clipsContent") and kids and self._draws(node)):
                 e = self.el(node, root, "box", asset=self._image_asset(node))
                 if not e:
                     return []
-                for k in kids:
-                    e.children.extend(self.flatten(k, root))
+                e.children.extend(self._flatten_children(kids, root))
                 return [e]
-            return [e for k in kids for e in self.flatten(k, root)]
+            return self._flatten_children(kids, root)
         self.warnings.append(f"Unsupported node type {t} ({node['name']})")
         return []
+
+    def _flatten_children(self, kids: list[dict], root: dict) -> list[El]:
+        return [e for k in kids for e in self.flatten(k, root)]
+
+    def _mask(self, node: dict, root: dict) -> dict | None:
+        bx = self.box(node, root)
+        if not bx:
+            return None
+        info = {"box": bx, "type": node["type"], "maskType": node.get("maskType", "ALPHA"), "node": node}
+        image = self._image_asset(node)
+        if image:
+            info["kind"], info["asset"] = "image", image
+        elif node["type"] == "ELLIPSE":
+            info["kind"] = "ellipse"
+        else:
+            info["kind"] = "rect"  # rectangles exactly; other vectors by their bounding box
+        return info
 
     # --- pages
     def build_page(self, frame: dict) -> Page:
@@ -196,7 +240,6 @@ class IRBuilder:
         page = El(root["id"], root["name"], "page", 0, 0, W, H, z=next(self._z), node=root)
         sections: list[El] = []
         kids = [self.nodes[c] for c in root.get("children", []) if c in self.nodes]
-
         if root.get("layoutMode") == "VERTICAL":
             # Structured file: each top-level child is a section.
             for i, k in enumerate(kids):

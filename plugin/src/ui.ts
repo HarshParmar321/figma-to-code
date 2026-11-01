@@ -250,7 +250,7 @@ function renderResult(r: Conversion) {
 }
 
 interface DesignCheck {
-  summary: { nodeCount: number };
+  summary: { nodeCount: number; exportedGroups?: number; exportedLayers?: number };
   layout: { autoLayoutCoverage: number };
   responsive: { sectionsByRole: Record<string, number>; sections: Record<string, { heading: string | null }[]> };
   findings: { severity: string; code: string; message: string; nodeIds?: string[] }[];
@@ -263,8 +263,11 @@ function renderDesignCheck(r: DesignCheck) {
   const findings = r.findings
     .map((f, idx) => `<div class="finding ${f.severity}" data-idx="${idx}"><strong>${escapeHtml(f.code)}</strong> ${escapeHtml(f.message)}</div>`)
     .join('');
-  reportEl.innerHTML = `<details><summary>Design check: ${r.summary.nodeCount} layers · Auto Layout ${Math.round(r.layout.autoLayoutCoverage * 100)}% · ${r.findings.length} tips</summary>
-    <div class="note">Sections found: ${secs}</div>${findings}</details>`;
+  const packed = r.summary.exportedLayers
+    ? `<div class="note">${r.summary.exportedLayers.toLocaleString()} of these layers are inside ${r.summary.exportedGroups} illustrations, each exported as one image, so only ${(r.summary.nodeCount - r.summary.exportedLayers).toLocaleString()} layers become HTML.</div>`
+    : '';
+  reportEl.innerHTML = `<details><summary>Design check: ${r.summary.nodeCount.toLocaleString()} layers · Auto Layout ${Math.round(r.layout.autoLayoutCoverage * 100)}% · ${r.findings.length} tips</summary>
+    ${packed}<div class="note">Sections found: ${secs}</div>${findings}</details>`;
   reportEl.querySelectorAll<HTMLElement>('.finding').forEach((el) => {
     const nodeId = r.findings[Number(el.dataset.idx)].nodeIds?.[0];
     if (nodeId) {

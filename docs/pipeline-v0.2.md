@@ -50,6 +50,23 @@ Goal: accuracy that holds on any design, not tuning per file; multi-page sites w
 | **Background jobs** | `POST /convert` returns immediately; the plugin polls `/convert/status` and shows live steps. Long conversions no longer end in "Failed to fetch". |
 | Bugs fixed | Layout recursion on touching items (Peachy Pup crash); frame sections (Auto Layout files) stacked their children at x=0; sections had two ids; gaps between frame sections were lost. The untouched sample page went from 0/15 to 15/15 elements on the first render. |
 
+## v0.4: any screen width, exact layer order, fast checks on huge files
+
+Found on the Peachy Pup file (10,949 layers) and the services page viewed on a laptop.
+
+| Problem | Cause | Fix |
+| --- | --- | --- |
+| Check ran 10+ minutes ("Checking … 558 s") | Not the layer count: images below the first 900 px are `loading="lazy"`; the headless check waited forever for them to load. | The checker switches lazy images to eager, waits at most 20 s for fonts/images, and correction rounds stop after a 120 s budget. Peachy Pup now converts **and** checks in **~11 s** (94 HTML elements measured; the 10,836 layers inside illustrations are exported as single images and never measured one by one). |
+| Website narrower/wider than the design looked wrong | Every position was measured from the left edge of the 1903 px frame, so on a 1440 px laptop the content sat off-centre and was cut on the right. | Each section spans the screen (backgrounds stretch) and its content sits on a stage of the design width, **centred**. Below the content width (e.g. 1248 px for Peachy Pup) the layout scales down in steps, so nothing is ever cut; below 768 px the mobile layout takes over. Solid panels touching the frame edge keep reaching the screen edge on wide monitors. At exactly the design width nothing changes, so fidelity is unaffected. |
+| Layers in the wrong order (bread hidden behind a pattern, glow over the title, badge cut) | Layout inference moved elements into boxes even when another layer painted between them; background layers were always put behind everything. | Elements are only nested when Figma's paint order is preserved; ellipses/vectors never become containers; every element that overlaps another (outside its own box) gets `z-index` = its Figma paint order, so the browser stacks exactly like Figma whatever the DOM structure. |
+| Masks ignored (curved "Lorem ipsum" text, clipped photos) | Mask layers were drawn as normal images. | The plugin exports mask groups without text as one 2× PNG. Otherwise the Engine applies the mask: image masks → CSS `mask-image`, rectangles → `clip-path: inset(… round r)`, ellipses → `clip-path: ellipse()`. |
+| Cropped photos showed the whole image | `CROP` image fills ignored `imageTransform`. | The exact crop window is cut out when the image is written (`<name>-c<id>.webp`). |
+| Radial/linear gradients off | Radial was a corner-to-corner circle; linear ignored handle positions. | Gradients map Figma's handles exactly (ellipse size and centre; angle and stop positions). |
+| Patterns too faint | Figma bakes a layer's opacity into its exported PNG/SVG; the CSS applied it a second time. | Opacity is not re-applied to exported layers. |
+| 14 MB bundle for one page | The inner layers of exported illustrations were sent too. | The plugin sends only their count (`exportedLayers`); the design check still reports the full layer count. |
+
+Results: Peachy Pup 94/94 elements in place, 98% / 97% / 97% / 100% section similarity (score capped at 69 only because the paid font TT Hoves is not installed); cleaning page 99.8; services page 83/83 (TT Hoves cap).
+
 ## Known limits (next steps)
 
 1. **Mobile frames:** read and paired with their page, but not yet merged into media queries (desktop/mobile element matching, FR-EXT-14). This is the next major step.
@@ -57,5 +74,6 @@ Goal: accuracy that holds on any design, not tuning per file; multi-page sites w
 3. **Interactions and motion:** hover variants, Smart Animate and the Motion panel are not generated yet (FR-MOT).
 4. **Visual (non-geometry) fixes:** the loop corrects positions and sizes; wrong colours, effects or fonts are reported but not yet auto-fixed.
 5. **Semantics:** form fields drawn as rectangles stay `div`s; heading levels are inferred from size.
-6. **Real files tested:** two flat landing pages and a large illustrated page (Peachy Pup, re-export needed with the new plugin). Still needed: a file built with Auto Layout and components, and one with a mobile frame.
+6. **Real files tested:** two flat landing pages and a large illustrated page (Peachy Pup). Still needed: a file built with Auto Layout and components, and one with a mobile frame.
 7. **Links between pages:** nav items are not yet linked to the generated pages automatically.
+8. **Between 768 px and the content width** the page scales like browser zoom (stepped every 32 px) rather than reflowing; a supplied tablet frame will replace this once breakpoint merging lands.

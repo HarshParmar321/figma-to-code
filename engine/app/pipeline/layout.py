@@ -38,17 +38,38 @@ def detect_offset_decorations(items: list[El]) -> list[El]:
     return [e for e in items if id(e) not in removed]
 
 
+CONTAINER_SHAPES = {"RECTANGLE", "FRAME", "COMPONENT", "INSTANCE", "SECTION"}
+
+
+def _can_contain(cand: El) -> bool:
+    """Rectangles, frames and image fills can hold content; ellipses, stars and vectors stay shapes."""
+    if cand.kind not in ("shape", "image"):
+        return False
+    t = (cand.node or {}).get("type", "RECTANGLE")
+    return t in CONTAINER_SHAPES
+
+
 def nest_contained(items: list[El]) -> list[El]:
-    """Assigns each element to the smallest earlier-painted shape/image that contains it."""
+    """Assigns each element to the smallest earlier-painted shape/image that contains it.
+
+    Nesting must not change what paints on top of what: an element is only moved into a box when
+    nothing painted between the box and the element (in Figma's order) overlaps it from outside.
+    """
     ordered = sorted(items, key=lambda e: e.z)
     parent: dict[int, El] = {}
     for i, e in enumerate(ordered):
         best = None
-        for cand in ordered[:i]:
-            if cand.kind not in ("shape", "image") or cand.area <= e.area or not cand.contains(e):
+        for j, cand in enumerate(ordered[:i]):
+            if not _can_contain(cand) or cand.area < e.area or not cand.contains(e):
                 continue
-            if best is None or cand.area < best.area:
-                best = cand
+            if cand.area == e.area and not e.contains(cand):
+                continue
+            if best is not None and cand.area >= best.area:
+                continue
+            between = ordered[j + 1 : i]
+            if any(o.intersects(e) and not cand.contains(o) for o in between):
+                continue  # something outside the box paints between them: keep e on top of it
+            best = cand
         if best is not None:
             parent[id(e)] = best
     top = []
@@ -70,11 +91,9 @@ def split_layers(items: list[El]) -> tuple[list[El], list[El]]:
     for e in items:
         # SVGs are never containers, so any overlap with later elements makes them a layer.
         # Shapes/images that fully contain later elements were already turned into boxes.
-        behind = [
-            o
-            for o in items
-            if o is not e and o.z > e.z and e.intersects(o) and (e.kind in ("svg", "raster") or not e.contains(o))
-        ]
+        # Anything still overlapping a later element here could not be nested without changing the
+        # paint order, so it is positioned instead.
+        behind = [o for o in items if o is not e and o.z > e.z and e.intersects(o)]
         if e.kind in ("svg", "raster", "shape", "image") and behind:
             layers.append(e)
         else:

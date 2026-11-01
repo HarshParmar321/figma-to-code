@@ -56,11 +56,19 @@ COLLECT_JS = """
 """
 
 READY_JS = """
-async () => {
-  await document.fonts.ready;
-  await Promise.all([...document.images].map(i => i.complete ? null : new Promise(r => { i.onload = i.onerror = r; })));
+async (limitMs) => {
+  // Lazy images below the fold never load in a headless page: load everything now.
+  document.querySelectorAll('img[loading="lazy"]').forEach(i => { i.loading = 'eager'; });
+  const ready = (async () => {
+    await document.fonts.ready;
+    await Promise.all([...document.images].map(i => i.complete ? null : new Promise(r => { i.onload = i.onerror = r; })));
+    await Promise.all([...document.images].map(i => i.decode ? i.decode().catch(() => null) : null));
+  })();
+  // Never wait forever (a broken font or image link must not stall the check).
+  return Promise.race([ready.then(() => true), new Promise(r => setTimeout(() => r(false), limitMs))]);
 }
 """
+READY_LIMIT_MS = 20_000
 
 
 # ----------------------------------------------------------------------------- image metrics
@@ -134,6 +142,7 @@ class Renderer:
         self.chromium_path = chromium_path
         self._pw = None
         self._browser = None
+        self.ready = True
 
     def __enter__(self) -> Renderer:
         from playwright.sync_api import sync_playwright
@@ -154,9 +163,9 @@ class Renderer:
     def capture(self, html_path: Path, width: int, ids: list[str], screenshot: Path) -> tuple[dict, dict]:
         pg = self._browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=1)
         try:
-            pg.goto(html_path.resolve().as_uri())
+            pg.goto(html_path.resolve().as_uri(), wait_until="domcontentloaded", timeout=60_000)
             pg.add_style_tag(content="*{caret-color:transparent !important}")
-            pg.evaluate(READY_JS)
+            self.ready = pg.evaluate(READY_JS, READY_LIMIT_MS)
             pg.wait_for_timeout(150)
             pg.screenshot(path=str(screenshot), full_page=True)
             data = pg.evaluate(COLLECT_JS, ids)

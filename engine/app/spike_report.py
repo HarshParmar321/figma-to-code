@@ -501,7 +501,11 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
         "generatedAt": datetime.now(UTC).isoformat(),
         "source": bundle["source"],
         "summary": {
-            "nodeCount": len(nodes),
+            # Layers in Figma, including the inside of illustrations the plugin exported as one image.
+            "nodeCount": len(nodes) + sum(int(n.get("exportedLayers") or 0) for n in nodes.values()),
+            "serializedNodes": len(nodes),
+            "exportedGroups": sum(1 for n in nodes.values() if n.get("exportedLayers")),
+            "exportedLayers": sum(int(n.get("exportedLayers") or 0) for n in nodes.values()),
             "frames": [
                 {"role": f["role"], "name": f["name"], "width": f["width"], "height": f["height"]} for f in frames
             ],
