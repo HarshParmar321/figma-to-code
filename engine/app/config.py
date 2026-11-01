@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     chromium_path: str | None = None
     # Public base URL used in links returned to the plugin.
     public_url: str = "http://localhost:8000"
+    # Disk housekeeping: only the most recent conversions are kept; older ones are deleted automatically.
+    keep_bundles: int = 8
+    # Below this much free disk space the Engine deletes old conversions first, then refuses new ones
+    # with a clear message instead of failing half-way.
+    min_free_mb: int = 400
     # Figma plugin UIs run in an iframe with origin "null", so CORS must allow it during development.
     cors_origins: list[str] = ["*"]
 

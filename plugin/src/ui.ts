@@ -111,6 +111,21 @@ function exportDesign(): Promise<void> {
   });
 }
 
+/** Readable message from an Engine error response (507 = the computer running the Engine is out of disk space). */
+async function engineError(res: Response, what: string): Promise<string> {
+  const text = await res.text();
+  let detail = text;
+  try {
+    const body = JSON.parse(text) as { detail?: unknown };
+    if (typeof body.detail === 'string') detail = body.detail;
+    else if (body.detail) detail = JSON.stringify(body.detail);
+  } catch {
+    /* plain text */
+  }
+  if (res.status === 507) return `Not enough disk space. ${detail}`;
+  return `${what} (${res.status}): ${detail}`;
+}
+
 async function uploadBundle(): Promise<string> {
   if (!bundle) throw new Error('Nothing exported yet.');
   const base = engineBase();
@@ -122,7 +137,7 @@ async function uploadBundle(): Promise<string> {
   } catch {
     throw new Error(`Can't reach the Engine at ${base}. Is it running?`);
   }
-  if (!res.ok) throw new Error(`Engine rejected the design (${res.status}): ${await res.text()}`);
+  if (!res.ok) throw new Error(await engineError(res, 'Engine rejected the design'));
   const { bundleId } = (await res.json()) as { bundleId: string };
   let i = 0;
   for (const [id, bytes] of assets) {
@@ -131,7 +146,7 @@ async function uploadBundle(): Promise<string> {
     const put = await fetch(`${base}/v1/bundles/${bundleId}/assets/${encodeURIComponent(id)}`, {
       method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: bytes as unknown as BodyInit,
     });
-    if (!put.ok) throw new Error(`Image ${id} failed (${put.status}): ${await put.text()}`);
+    if (!put.ok) throw new Error(await engineError(put, `Image ${id} failed`));
   }
   return bundleId;
 }
@@ -174,7 +189,7 @@ interface Conversion {
 async function generate(bundleId: string): Promise<Conversion> {
   const base = engineBase();
   const start = await fetch(`${base}/v1/bundles/${bundleId}/convert`, { method: 'POST' });
-  if (!start.ok && start.status !== 202) throw new Error(`Conversion failed (${start.status}): ${await start.text()}`);
+  if (!start.ok && start.status !== 202) throw new Error(await engineError(start, 'Conversion failed'));
   // The Engine converts in the background; poll its progress instead of holding one long request.
   for (;;) {
     await new Promise((r) => setTimeout(r, 1000));
@@ -288,7 +303,7 @@ async function uploadFontsAndReconvert(bundleId: string) {
     const res = await fetch(`${engineBase()}/v1/fonts/${encodeURIComponent(family)}/${encodeURIComponent(file.name)}`, {
       method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: await file.arrayBuffer(),
     });
-    if (!res.ok) throw new Error(`Font ${file.name} failed (${res.status}): ${await res.text()}`);
+    if (!res.ok) throw new Error(await engineError(res, `Font ${file.name} failed`));
   }
   setStatus('Converting again with your fonts…');
   const r = await generate(bundleId);

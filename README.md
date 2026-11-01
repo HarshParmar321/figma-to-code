@@ -70,6 +70,8 @@ Free Google fonts load automatically. For any other font (for example a paid fon
 | `ENGINE_FONT_DIR` | `engine/data/fonts` | Self-hosted fonts, one folder per family (`tt-hoves/TTHoves-Bold.otf`, any naming with a weight word; .woff2/.woff/.otf/.ttf; variable fonts supported). Fonts not found here load from Google Fonts. |
 | `ENGINE_CHROMIUM_PATH` | Playwright's Chromium | Use a specific Chrome/Chromium binary for the comparison |
 | `ENGINE_PUBLIC_URL` | `http://localhost:8000` | Base URL used in links returned to the plugin |
+| `ENGINE_KEEP_BUNDLES` | `8` | Only the most recent conversions are kept; older ones are deleted automatically |
+| `ENGINE_MIN_FREE_MB` | `400` | Below this much free disk space, old conversions are removed first; if that is not enough the plugin shows "Not enough disk space" instead of a crash |
 
 ## Command-line tools
 

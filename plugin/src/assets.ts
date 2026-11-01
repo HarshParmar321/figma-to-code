@@ -7,7 +7,8 @@ export interface ExportedAsset {
   bytes: Uint8Array;
 }
 
-const REFERENCE_SCALES = [1, 2];
+// 1x is what the Engine compares against; a 2x copy doubled upload time and disk use for nothing.
+const REFERENCE_SCALES = [1];
 
 export async function exportReference(frame: SceneNode, role: FrameRole, diagnostics: Diagnostic[]): Promise<ExportedAsset[]> {
   const out: ExportedAsset[] = [];

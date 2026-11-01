@@ -1,15 +1,17 @@
 """Engine HTTP API: receive bundles and assets, convert them to code, serve preview and reports."""
 
+import io
 import json
 import re
 import threading
 import time
+import zipfile
 from collections import defaultdict
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import __version__
@@ -18,7 +20,7 @@ from .pipeline import fonts as fontfiles
 from .pipeline.convert import convert
 from .schema import validate_bundle
 from .spike_report import build_report
-from .storage import BundleStore, NotFound
+from .storage import BundleStore, DiskFull, NotFound, is_disk_full
 
 _convert_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 _jobs: dict[str, dict] = {}  # bundle id -> conversion job state (in memory; one job per bundle)
@@ -30,7 +32,20 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT"],
     allow_headers=["content-type"],
 )
-store = BundleStore(settings.data_dir)
+store = BundleStore(settings.data_dir, keep=settings.keep_bundles, min_free_mb=settings.min_free_mb)
+
+
+@app.exception_handler(DiskFull)
+async def _disk_full(_request: Request, exc: DiskFull) -> JSONResponse:
+    return JSONResponse(status_code=507, content={"detail": str(exc), "code": "DISK_FULL"})
+
+
+@app.exception_handler(OSError)
+async def _os_error(_request: Request, exc: OSError) -> JSONResponse:
+    if is_disk_full(exc):
+        return JSONResponse(status_code=507, content={"detail": str(DiskFull(store.free_bytes(), store.min_free)),
+                                                      "code": "DISK_FULL"})  # fmt: skip
+    raise exc
 
 
 class BundleCreated(BaseModel):
@@ -65,7 +80,9 @@ async def create_bundle(request: Request) -> BundleCreated:
     errors = validate_bundle(bundle)
     if errors:
         raise HTTPException(422, {"message": "Bundle does not match schema v0.1", "errors": errors})
-    bundle_id = store.create(bundle)
+    expected = len(body) + sum(int(a.get("byteLength") or 0) for a in bundle["assets"]) * 2  # assets + output
+    running = {bid for bid, j in _jobs.items() if j.get("status") == "running"}
+    bundle_id = store.create(bundle, expected_bytes=expected, protect=running)
     return BundleCreated(bundleId=bundle_id, assetIds=[a["id"] for a in bundle["assets"]])
 
 
@@ -198,7 +215,11 @@ def _job_thread(bundle_id: str, verify: bool) -> None:
         job["status"] = "done"
     except Exception as e:  # surfaced to the plugin instead of a dropped connection
         job["status"] = "failed"
-        job["error"] = f"{type(e).__name__}: {str(e).splitlines()[0][:500] if str(e) else ''}"
+        if is_disk_full(e):
+            job["error"] = str(DiskFull(store.free_bytes(), store.min_free))
+            job["code"] = "DISK_FULL"
+        else:
+            job["error"] = f"{type(e).__name__}: {str(e).splitlines()[0][:500] if str(e) else ''}"
     job["finishedAt"] = time.time()
 
 
@@ -264,16 +285,23 @@ def get_conversion(bundle_id: str) -> dict:
 
 
 @app.get("/v1/bundles/{bundle_id}/code.zip")
-def download_code(bundle_id: str) -> FileResponse:
+def download_code(bundle_id: str) -> Response:
+    """The generated site as a zip, built on request (nothing extra is stored on disk)."""
     try:
-        path = store.bundle_dir(bundle_id) / "code.zip"
+        out = store.bundle_dir(bundle_id) / "output"
     except NotFound as e:
         raise HTTPException(404, "Bundle not found") from e
-    if not path.exists():
+    if not (out / "index.html").exists():
         raise HTTPException(404, "Not converted yet")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(out.rglob("*")):
+            if f.is_file():
+                z.write(f, f.relative_to(out).as_posix())
     meta = store.load(bundle_id)["source"]
     name = "".join(c if c.isalnum() or c in "-_" else "-" for c in meta.get("fileName", "design")).strip("-")
-    return FileResponse(path, media_type="application/zip", filename=f"{name or 'design'}-code.zip")
+    headers = {"Content-Disposition": f'attachment; filename="{name or "design"}-code.zip"'}
+    return Response(buf.getvalue(), media_type="application/zip", headers=headers)
 
 
 @app.get("/v1/bundles/{bundle_id}/output/{path:path}")

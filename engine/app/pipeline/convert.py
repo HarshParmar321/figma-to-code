@@ -191,9 +191,9 @@ def convert(
         if len(scored) > 1:
             write_site_report(result, fid_dir, bundle["source"].get("fileName", "Design"))
 
-    zip_path = Path(shutil.make_archive(str(bundle_dir / "code"), "zip", root_dir=out_dir))
+    (bundle_dir / "code.zip").unlink(missing_ok=True)  # zips are built on download now
     result["files"] = sorted(str(p.relative_to(out_dir)) for p in out_dir.rglob("*") if p.is_file())
-    result["zip"] = zip_path.name
+    result["zip"] = "code.zip"
     result["frame"] = pages[0].role if pages else role
     result["seconds"] = round(time.time() - started, 2)
     (bundle_dir / "conversion.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
