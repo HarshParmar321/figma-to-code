@@ -133,6 +133,7 @@ interface Report {
   text: { textNodes: number; fonts: { family: string; style: string }[] };
   interactions: { nodesWithReactions: number };
   fieldCoverage: { ratio: number };
+  responsive: { sectionsByRole: Record<string, number>; sections: Record<string, { heading: string | null }[]> };
   findings: { severity: 'error' | 'warning' | 'info'; code: string; message: string; nodeIds?: string[] }[];
 }
 
@@ -142,6 +143,10 @@ function renderReport(bundleId: string, r: Report) {
     ['Layers', String(r.summary.nodeCount)],
     ['Auto Layout coverage', pct(r.layout.autoLayoutCoverage)],
     ['Field coverage', pct(r.fieldCoverage.ratio)],
+    ...Object.entries(r.responsive.sectionsByRole).map(([role, n]): [string, string] => [
+      `Sections (${role})`,
+      `${n}: ${(r.responsive.sections[role] ?? []).map((s) => s.heading?.split('\n')[0] ?? '–').join(' · ')}`,
+    ]),
     ['Text layers', String(r.text.textNodes)],
     ['Fonts', String(r.text.fonts.length)],
     ['Layers with interactions', String(r.interactions.nodesWithReactions)],

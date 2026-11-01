@@ -40,7 +40,17 @@
 
 | File | Layers | AL coverage | Field coverage | Export time | Bundle size | Main gaps |
 | --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | |
+| 12 Free Landing Pages · "Cleaning" (desktop only, 1903×3383) | 179 | 0% (0/28) | 100% | 7.5 s | 296 KB JSON + 21 MB assets | No mobile frame; fully flat layout (39 loose layers, 27 groups); one 11 MB JPG image fill |
+
+### Learnings so far
+
+- **Extraction is complete.** Every required property was read; all 13 assets uploaded; fonts (Roboto, Mitr, Poppins) are all Google Fonts.
+- **Real files are often flat.** No section frames and no Auto Layout: sections exist only as full-width background rectangles. The report now detects sections from those bands (5 found here: Hero, About Us, Services, Testimonials, Footer). The generator needs the same logic (EXT-03).
+- **Use absolute boxes for geometry.** Children of groups report x/y relative to the nearest frame, not the group, and the root frame sat at x=10333 on the canvas. The extractor must work from `absoluteBoundingBox` relative to the root frame.
+- **Repeated patterns are visible but unmarked.** 3 service cards, 4 testimonial cards, 6 numbered steps and 4 identical buttons are separate groups, not components. Repeat detection must work from structure, not component data.
+- **Fake shadows.** Buttons are two stacked rectangles offset by 4 px (a "hard shadow"); the generator should map this pattern to `box-shadow` rather than two elements.
+- **Image size.** One image fill is 11 MB; asset optimization (FR-EXT-21) is needed before preview hosting.
+- **Odd desktop width.** 1903 px (1920 minus a scrollbar); content sits in a ~1200 px centred column (x 350–1552), which the generator should infer as the container width.
 
 ## Known limits of this version
 

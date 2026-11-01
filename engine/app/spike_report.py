@@ -120,6 +120,76 @@ def _visible_children(nodes: dict, node: dict) -> list[dict]:
     return [nodes[c] for c in node.get("children", []) if c in nodes and nodes[c].get("visible", True)]
 
 
+def _rel_box(node: dict, root: dict) -> tuple[float, float, float, float] | None:
+    """Box relative to the root frame, from absoluteBoundingBox.
+
+    Plain x/y are relative to the nearest FRAME (groups do not create a coordinate space),
+    so absolute boxes are the only reliable geometry.
+    """
+    b, rb = node.get("absoluteBoundingBox"), root.get("absoluteBoundingBox")
+    if not b or not rb:
+        return None
+    return b["x"] - rb["x"], b["y"] - rb["y"], b["width"], b["height"]
+
+
+BAND_MIN_WIDTH_RATIO = 0.95
+BAND_MIN_HEIGHT = 48
+
+
+def detect_sections(nodes: dict, root: dict) -> list[dict]:
+    """Splits a frame into vertical sections.
+
+    Uses the root's direct children when they are already full-width frames; otherwise uses
+    full-width background shapes (rectangles, frames, groups) as section boundaries. Every
+    other top-level child is assigned to the band containing its vertical centre.
+    """
+    rbox = _rel_box(root, root)
+    if not rbox:
+        return []
+    width, height = rbox[2], rbox[3]
+    children = [c for c in _visible_children(nodes, root) if _rel_box(c, root)]
+    starts = {0.0}
+    for c in children:
+        _, y, w, h = _rel_box(c, root)
+        if w >= width * BAND_MIN_WIDTH_RATIO and h >= BAND_MIN_HEIGHT and c["type"] != "TEXT":
+            starts.add(max(0.0, round(y, 1)))
+    edges = sorted(s for s in starts if s < height) + [height]
+    bands = [{"top": edges[i], "bottom": edges[i + 1], "nodeIds": []} for i in range(len(edges) - 1)]
+    for c in children:
+        _, y, _, h = _rel_box(c, root)
+        cy = y + h / 2
+        band = next((b for b in bands if b["top"] <= cy < b["bottom"]), bands[-1])
+        band["nodeIds"].append(c["id"])
+
+    sections = []
+    for i, b in enumerate(bands):
+        ids = set(b["nodeIds"])
+        stack = list(ids)
+        while stack:  # collect descendants to find the band's heading
+            nid = stack.pop()
+            for k in nodes[nid].get("children", []):
+                if k in nodes and k not in ids:
+                    ids.add(k)
+                    stack.append(k)
+        texts = [nodes[t] for t in ids if nodes[t]["type"] == "TEXT" and nodes[t].get("characters")]
+        heading = max(
+            texts,
+            key=lambda t: t.get("fontSize") if isinstance(t.get("fontSize"), (int, float)) else 0,
+            default=None,
+        )
+        sections.append(
+            {
+                "index": i,
+                "top": b["top"],
+                "height": round(b["bottom"] - b["top"], 1),
+                "topLevelNodes": len(b["nodeIds"]),
+                "heading": heading["characters"][:60] if heading else None,
+                "nodeIds": b["nodeIds"],
+            }
+        )
+    return sections
+
+
 def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_id: str | None = None) -> dict:
     nodes: dict[str, dict] = bundle["nodes"]
     frames = bundle["frames"]
@@ -144,7 +214,8 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
         if n.get("insideSvg") or n.get("exportAs") == "svg" or not n.get("visible", True):
             continue
         kids = _visible_children(nodes, n)
-        if n["type"] in CONTAINER_TYPES and len(kids) >= 2:
+        # Groups count as containers too: they hold children but carry no layout data.
+        if (n["type"] in CONTAINER_TYPES or n["type"] == "GROUP") and len(kids) >= 2:
             containers += 1
             if n.get("layoutMode") in AUTO_LAYOUT_MODES:
                 auto_layout += 1
@@ -227,18 +298,35 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
     motion_nodes = [n["id"] for n in nodes.values() if n.get("motion")]
 
     # --- responsive pairing
-    sections = {}
+    sections: dict[str, list[dict]] = {}
+    top_level: dict[str, list[dict]] = {}
     for f in frames:
         root = nodes.get(f["rootId"])
-        sections[f["role"]] = [c for c in _visible_children(nodes, root)] if root else []
-    desktop_names = [s["name"] for s in sections.get("desktop", [])]
-    mobile_names = {s["name"] for s in sections.get("mobile", [])}
+        top_level[f["role"]] = _visible_children(nodes, root) if root else []
+        sections[f["role"]] = detect_sections(nodes, root) if root else []
+
+    def _keys(role: str) -> list[str]:
+        # Match sections by heading text, falling back to the names of their top-level layers.
+        out = []
+        for s in sections.get(role, []):
+            if s["heading"]:
+                out.append(s["heading"].strip().lower())
+            elif len(s["nodeIds"]) == 1:
+                out.append(nodes[s["nodeIds"][0]]["name"].strip().lower())
+        return out
+
+    desktop_keys, mobile_keys = _keys("desktop"), set(_keys("mobile"))
     name_match = (
-        sum(1 for nm in desktop_names if nm in mobile_names) / len(desktop_names)
-        if desktop_names and mobile_names
+        sum(1 for k in desktop_keys if k in mobile_keys) / len(desktop_keys)
+        if desktop_keys and mobile_keys
         else 0.0
     )
-    default_named = [s["id"] for ss in sections.values() for s in ss if DEFAULT_NAME_RE.match(s["name"])]
+    default_named = [s["id"] for ss in top_level.values() for s in ss if DEFAULT_NAME_RE.match(s["name"])]
+    flat_roles = [
+        role
+        for role, kids in top_level.items()
+        if len(kids) > len(sections.get(role, [])) * 2 and len(sections.get(role, [])) > 1
+    ]
 
     # --- field coverage
     checked, complete, missing_by_field = 0, 0, Counter()
@@ -296,8 +384,15 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
         finding(
             "warning",
             "SECTION_COUNT_MISMATCH",
-            f"Desktop has {len(sections['desktop'])} top-level sections, mobile has "
-            f"{len(sections['mobile'])}.",
+            f"Desktop has {len(sections['desktop'])} sections, mobile has {len(sections['mobile'])}.",
+        )
+    for role in flat_roles:
+        finding(
+            "info",
+            "FLAT_LAYOUT",
+            f"The {role} frame has {len(top_level[role])} loose top-level layers; "
+            f"{len(sections[role])} sections were detected from full-width background shapes. "
+            "Wrapping each section in its own frame improves results.",
         )
     if missing_main:
         finding("warning", "MISSING_MAIN_COMPONENT", "Instances without a main component.", missing_main)
@@ -404,7 +499,12 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
         "motion": {"nodesWithMotionData": len(motion_nodes)},
         "responsive": {
             "sectionsByRole": {role: len(s) for role, s in sections.items()},
+            "topLevelLayersByRole": {role: len(k) for role, k in top_level.items()},
             "sectionNameMatchRatio": round(name_match, 4),
+            "sections": {
+                role: [{k: v for k, v in s.items() if k != "nodeIds"} for s in ss]
+                for role, ss in sections.items()
+            },
         },
         "fieldCoverage": {
             "checked": checked,
@@ -442,9 +542,19 @@ def to_markdown(r: dict) -> str:
         f"| Motion panel layers | {r['motion']['nodesWithMotionData']} |",
         f"| Assets declared | {s['assetDeclared']} {s['assetKinds']} |",
         "",
-        "## Findings",
+        "## Sections",
         "",
+        "| Frame | # | Top (px) | Height (px) | Top-level layers | Heading |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
+    for role, secs in r["responsive"]["sections"].items():
+        for sec in secs:
+            heading = (sec["heading"] or "–").replace("\n", " ")
+            lines.append(
+                f"| {role} | {sec['index'] + 1} | {sec['top']:g} | {sec['height']:g} | "
+                f"{sec['topLevelNodes']} | {heading} |"
+            )
+    lines += ["", "## Findings", ""]
     if not r["findings"]:
         lines.append("None.")
     for f in r["findings"]:
