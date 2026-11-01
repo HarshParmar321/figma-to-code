@@ -52,7 +52,9 @@ def convert(
             try:
                 fid = verify(out_dir, bundle_dir / "fidelity", page, gen.expectations, ref, chromium_path)
                 write_report_html(fid, bundle_dir / "fidelity", bundle["source"].get("fileName", "Design"))
-                result["fidelity"] = {k: fid[k] for k in ("score", "band", "subScores", "counts", "sections")}
+                result["fidelity"] = {
+                    k: fid[k] for k in ("score", "band", "subScores", "counts", "sections", "missingFonts")
+                }
                 result["fidelity"]["topIssues"] = fid["issues"][:10]
             except Exception as e:  # browser missing, crash: generation still succeeds
                 msg = str(e).splitlines()[0][:300]

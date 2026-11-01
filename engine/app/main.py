@@ -1,8 +1,10 @@
 """Engine HTTP API: receive bundles and assets, convert them to code, serve preview and reports."""
 
 import json
+import re
 import threading
 from collections import defaultdict
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +13,7 @@ from pydantic import BaseModel
 
 from . import __version__
 from .config import settings
+from .pipeline import fonts as fontfiles
 from .pipeline.convert import convert
 from .schema import validate_bundle
 from .spike_report import build_report
@@ -111,6 +114,47 @@ def get_report(bundle_id: str) -> dict:
     report = build_report(bundle, uploaded_assets=set(meta["assets"]), bundle_id=bundle_id)
     store.save_report(bundle_id, report)
     return report
+
+
+FONT_MAX_BYTES = 15 * 1024 * 1024
+
+
+@app.get("/v1/fonts")
+def list_fonts() -> dict:
+    """Font families available for self-hosting, with their files."""
+    out: dict[str, list[str]] = {}
+    root = settings.font_dir
+    if root.exists():
+        for folder in sorted(p for p in root.iterdir() if p.is_dir()):
+            files = sorted(p.name for p in folder.iterdir() if p.suffix.lower() in fontfiles.EXTENSIONS)
+            if files:
+                out[folder.name] = files
+    return {"fontDir": str(root), "families": out}
+
+
+@app.put("/v1/fonts/{family}/{filename}")
+async def upload_font(family: str, filename: str, request: Request) -> dict:
+    """Stores a font file so the next conversion can self-host it (needed for non-Google fonts)."""
+    ext = Path(filename).suffix.lower()
+    if ext not in fontfiles.EXTENSIONS:
+        raise HTTPException(400, "Font files must be .woff2, .woff, .otf or .ttf")
+    safe_name = re.sub(r"[^A-Za-z0-9 ._-]+", "_", Path(filename).name).strip() or f"font{ext}"
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "Empty font file")
+    if len(data) > FONT_MAX_BYTES:
+        raise HTTPException(413, "Font file is larger than 15 MB")
+    folder = settings.font_dir / fontfiles.slug(family)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / safe_name).write_bytes(data)
+    parsed = fontfiles.parse(folder / safe_name, family)
+    return {
+        "family": family,
+        "file": safe_name,
+        "weight": parsed.weight if parsed else None,
+        "style": parsed.style if parsed else None,
+        "variable": parsed.variable if parsed else False,
+    }
 
 
 def _links(bundle_id: str) -> dict:

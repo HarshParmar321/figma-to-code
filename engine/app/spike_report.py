@@ -136,30 +136,96 @@ BAND_MIN_WIDTH_RATIO = 0.95
 BAND_MIN_HEIGHT = 48
 
 
+LEAF_TYPES = {"TEXT", "RECTANGLE", "ELLIPSE", "POLYGON", "STAR", "LINE", "VECTOR", "BOOLEAN_OPERATION"}
+STRADDLE_TOL = 1.0
+
+
+def _scan(nodes: dict, root: dict, width: float) -> tuple[set[float], list[tuple[float, float]]]:
+    """Returns (candidate section edges, vertical extents of content).
+
+    Edges are the top and bottom of full-width shapes and groups. Content is every visible
+    non-full-width leaf (text, shape, exported SVG) at any depth.
+    """
+    spans: list[tuple[float, float]] = []
+    content: list[tuple[float, float]] = []
+    stack = list(_visible_children(nodes, root))
+    while stack:
+        n = stack.pop()
+        box = _rel_box(n, root)
+        if not box or n.get("opacity", 1) == 0:
+            continue
+        _, y, w, h = box
+        full = w >= width * BAND_MIN_WIDTH_RATIO and h >= BAND_MIN_HEIGHT and n["type"] != "TEXT"
+        if full:
+            spans.append((round(y, 1), round(y + h, 1)))
+        if n.get("exportAs") == "svg" or n["type"] in LEAF_TYPES:
+            if not full:
+                content.append((y, y + h))
+            continue
+        if _draws(n) and not full:
+            content.append((y, y + h))  # a styled frame is one box: never split through it
+        stack.extend(_visible_children(nodes, n))
+    # Top edges always count; a bottom edge only counts when no other full-width shape covers that line
+    # (otherwise it is hidden under the next background and is not a visible boundary).
+    edges = {top for top, _ in spans}
+    for i, (_, bottom) in enumerate(spans):
+        if not any(j != i and top < bottom < bot for j, (top, bot) in enumerate(spans)):
+            edges.add(bottom)
+    return edges, content
+
+
+def _draws(n: dict) -> bool:
+    def visible(paints) -> bool:
+        return isinstance(paints, list) and any(p.get("visible", True) and p.get("opacity", 1) > 0 for p in paints)
+
+    return visible(n.get("fills")) or visible(n.get("strokes"))
+
+
 def detect_sections(nodes: dict, root: dict) -> list[dict]:
     """Splits a frame into vertical sections.
 
-    Uses the root's direct children when they are already full-width frames; otherwise uses
-    full-width background shapes (rectangles, frames, groups) as section boundaries. Every
-    other top-level child is assigned to the band containing its vertical centre.
+    Candidate boundaries are the top and bottom edges of full-width background shapes. A
+    boundary is only used when no content crosses it, so a card row is never cut in half.
+    Each top-level child goes to the band containing its vertical centre; empty bands merge
+    into the band above.
     """
     rbox = _rel_box(root, root)
     if not rbox:
         return []
     width, height = rbox[2], rbox[3]
     children = [c for c in _visible_children(nodes, root) if _rel_box(c, root)]
-    starts = {0.0}
-    for c in children:
-        _, y, w, h = _rel_box(c, root)
-        if w >= width * BAND_MIN_WIDTH_RATIO and h >= BAND_MIN_HEIGHT and c["type"] != "TEXT":
-            starts.add(max(0.0, round(y, 1)))
-    edges = sorted(s for s in starts if s < height) + [height]
+    candidates, content = _scan(nodes, root, width)
+    valid = {0.0}
+    for e in candidates:
+        if 0 < e < height and not any(top < e - STRADDLE_TOL and bottom > e + STRADDLE_TOL for top, bottom in content):
+            valid.add(e)
+    edges = sorted(valid) + [height]
     bands = [{"top": edges[i], "bottom": edges[i + 1], "nodeIds": []} for i in range(len(edges) - 1)]
-    for c in children:
-        _, y, _, h = _rel_box(c, root)
+
+    def assign(n: dict) -> None:
+        _, y, _, h = _rel_box(n, root)
+        spanned = [b for b in bands if y < b["bottom"] - STRADDLE_TOL and y + h > b["top"] + STRADDLE_TOL]
+        dissolvable = n["type"] in ("GROUP", "FRAME", "SECTION") and not _draws(n) and n.get("exportAs") != "svg"
+        kids = [k for k in _visible_children(nodes, n) if _rel_box(k, root)]
+        if len(spanned) > 1 and dissolvable and kids:
+            for k in kids:  # a group has no layout of its own: place each child where it actually is
+                assign(k)
+            return
         cy = y + h / 2
         band = next((b for b in bands if b["top"] <= cy < b["bottom"]), bands[-1])
-        band["nodeIds"].append(c["id"])
+        band["nodeIds"].append(n["id"])
+
+    for c in children:
+        assign(c)
+    merged: list[dict] = []
+    for b in bands:
+        if merged and not b["nodeIds"]:
+            merged[-1]["bottom"] = b["bottom"]
+        elif merged and not merged[-1]["nodeIds"]:
+            merged[-1]["bottom"], merged[-1]["nodeIds"] = b["bottom"], b["nodeIds"]
+        else:
+            merged.append(b)
+    bands = merged
 
     sections = []
     for i, b in enumerate(bands):

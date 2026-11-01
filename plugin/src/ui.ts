@@ -155,6 +155,7 @@ interface Conversion {
     counts: Record<string, number>;
     sections: { section: string; ssim: number }[];
     topIssues: { severity: string; category: string; name: string | null; message: string; id: string | null }[];
+    missingFonts?: string[];
   };
 }
 
@@ -181,9 +182,19 @@ function renderResult(r: Conversion) {
     ? `<h2>Top issues</h2>${f.topIssues.slice(0, 5).map((i, idx) => `<div class="finding ${i.severity}" data-idx="${idx}"><strong>${escapeHtml(i.name ?? i.category)}</strong> ${escapeHtml(i.message)}</div>`).join('')}`
     : '';
   const notes = [...r.assumptions, ...r.warnings].map((n) => `<div class="note">• ${escapeHtml(n)}</div>`).join('');
+  const missing = f?.missingFonts ?? [];
+  const fontsHtml = missing.length
+    ? `<div class="fonts"><h2>Missing fonts</h2>
+       <div class="note">These fonts are not free web fonts, so a fallback font was used and the text does not match exactly.
+       Add the font files (.woff2, .woff, .otf or .ttf, one per weight) and convert again.</div>
+       ${missing.map((fam, i) => `<label class="font-row"><span>${escapeHtml(fam)}</span>
+         <input type="file" id="font-${i}" data-family="${escapeHtml(fam)}" accept=".woff2,.woff,.otf,.ttf" multiple></label>`).join('')}
+       <div class="row"><button id="fonts-reconvert">Upload fonts and convert again</button></div></div>`
+    : '';
   resultEl.innerHTML = `<div class="result">${scoreHtml}
     <div class="row"><button id="open-preview">Open preview</button><button id="open-report" class="secondary">Report</button><button id="get-code" class="secondary">Download code</button></div>
-    ${notes}${issues}</div>`;
+    ${fontsHtml}${notes}${issues}</div>`;
+  if (missing.length) $('fonts-reconvert').onclick = () => run(() => uploadFontsAndReconvert(r.bundleId));
   $('open-preview').onclick = () => send({ type: 'open-url', url: r.previewUrl });
   $('open-report').onclick = () => send({ type: 'open-url', url: r.reportUrl });
   $('get-code').onclick = () => send({ type: 'open-url', url: r.zipUrl });
@@ -222,6 +233,25 @@ function renderDesignCheck(r: DesignCheck) {
       el.onclick = () => send({ type: 'select-node', nodeId });
     }
   });
+}
+
+async function uploadFontsAndReconvert(bundleId: string) {
+  const inputs = Array.from(resultEl.querySelectorAll<HTMLInputElement>('input[type=file][data-family]'));
+  const files = inputs.flatMap((input) => Array.from(input.files ?? []).map((file) => ({ family: input.dataset.family!, file })));
+  if (!files.length) throw new Error('Choose at least one font file first.');
+  let i = 0;
+  for (const { family, file } of files) {
+    i += 1;
+    setStatus(`Uploading font ${i}/${files.length}: ${file.name}…`);
+    const res = await fetch(`${engineBase()}/v1/fonts/${encodeURIComponent(family)}/${encodeURIComponent(file.name)}`, {
+      method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: await file.arrayBuffer(),
+    });
+    if (!res.ok) throw new Error(`Font ${file.name} failed (${res.status}): ${await res.text()}`);
+  }
+  setStatus('Converting again with your fonts…');
+  const r = await generate(bundleId);
+  setStatus('');
+  renderResult(r);
 }
 
 // ------------------------------------------------------------------ actions

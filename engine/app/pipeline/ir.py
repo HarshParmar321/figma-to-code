@@ -39,6 +39,7 @@ class El:
     tag: str | None = None
     role: str | None = None
     auto: bool = False  # Auto Layout frame: layout comes from Figma, not inference
+    bleed: tuple[float, float, float, float] | None = None  # SVG export area beyond the box (t, r, b, l)
 
     @property
     def right(self) -> float:
@@ -106,6 +107,21 @@ class IRBuilder:
             return None
         return El(node["id"], node["name"], kind, *bx, z=next(self._z), node=node, **kw)
 
+    @staticmethod
+    def _bleed(node: dict) -> tuple[float, float, float, float] | None:
+        """How far the render bounds (shadows, outside strokes) extend past the layer box.
+
+        Figma exports SVGs at the render bounds, so the image must be drawn that much larger.
+        """
+        b, r = node.get("absoluteBoundingBox"), node.get("absoluteRenderBounds")
+        if not b or not r:
+            return None
+        t = max(0.0, b["y"] - r["y"])
+        left = max(0.0, b["x"] - r["x"])
+        right = max(0.0, (r["x"] + r["width"]) - (b["x"] + b["width"]))
+        bottom = max(0.0, (r["y"] + r["height"]) - (b["y"] + b["height"]))
+        return (t, right, bottom, left) if max(t, right, bottom, left) > 0.5 else None
+
     # --- classification
     def _image_asset(self, node: dict) -> str | None:
         for p in visible_paints(node.get("fills")):
@@ -127,7 +143,7 @@ class IRBuilder:
         if node.get("exportAs") == "svg":
             asset = f"svg-{_sanitize(node['id'])}"
             if asset in self.asset_ids:
-                e = self.el(node, root, "svg", asset=asset)
+                e = self.el(node, root, "svg", asset=asset, bleed=self._bleed(node))
                 return [e] if e else []
             self.warnings.append(f"SVG asset missing for {node['name']} ({node['id']})")
             return []
@@ -211,15 +227,14 @@ class IRBuilder:
 
     @staticmethod
     def _pull_backgrounds(sec: El, page_width: float) -> None:
-        """Full-width shapes and images at the top of a band become section background layers."""
+        """Full-width shapes, images and graphics become section background layers, wherever they start.
+
+        They keep their exact position (they may start above the section or run past its bottom) and
+        paint in their original order behind the section's content.
+        """
         keep = []
         for e in sec.children:
-            is_bg = (
-                e.kind in ("shape", "image", "svg")
-                and e.w >= page_width * FULL_WIDTH_RATIO
-                and e.y <= sec.y + 2
-                and e.h >= sec.h * 0.5
-            )
+            is_bg = e.kind in ("shape", "image", "svg") and e.w >= page_width * FULL_WIDTH_RATIO and e.h >= 24
             (sec.layers if is_bg else keep).append(e)
         sec.children = keep
 

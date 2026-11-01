@@ -12,6 +12,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import fonts as fontfiles
 from .ir import El, Page
 from .styles import background, border, border_widths, effects, line_height_px, px, radius, text_style
 
@@ -118,6 +119,31 @@ class Generator:
                     e.role, e.tag = "button", "a"
                     for t in _texts(e):
                         t.tag = "span"
+
+    @staticmethod
+    def _draw_box(e: El) -> tuple[float, float, float, float]:
+        """Box an element is drawn at: its layer box plus any SVG bleed (shadows, outside strokes)."""
+        if not e.bleed:
+            return e.x, e.y, e.w, e.h
+        t, r, b, left = e.bleed
+        return e.x - left, e.y - t, e.w + left + r, e.h + t + b
+
+    @staticmethod
+    def _apply_bleed(e: El, d: dict[str, str]) -> None:
+        """Negative margins so a larger-than-box SVG still takes exactly its box in the layout."""
+        t, r, b, left = e.bleed
+
+        def val(key: str) -> float:
+            v = d.get(key, "0")
+            return float(v[:-2]) if v.endswith("px") else float(v or 0)
+
+        if d.get("position") == "absolute":
+            d["left"], d["top"] = px(val("left") - left), px(val("top") - t)
+            return
+        d["margin-left"] = px(val("margin-left") - left)
+        d["margin-top"] = px(val("margin-top") - t)
+        d["margin-right"] = px(-r)
+        d["margin-bottom"] = px(-b)
 
     def _svg_data_uri(self, asset_id: str, limit: int = 24_000) -> str | None:
         """Small SVGs used as CSS masks are inlined: browsers refuse file:// masks."""
@@ -282,10 +308,11 @@ class Generator:
             f = self.image_file(e.asset, e.w, e.h)
             blur = self._backdrop_blur(e)
             mask_src = self._svg_data_uri(e.asset) or f"url('../images/{f}')"
+            bx, by, bw, bh = self._draw_box(e)
             main.update(
                 {
-                    "width": px(e.w),
-                    "height": px(e.h),
+                    "width": px(bw),
+                    "height": px(bh),
                     "background-color": "#ffffff",
                     "-webkit-mask": f"{mask_src} center / 100% 100% no-repeat",
                     "mask": f"{mask_src} center / 100% 100% no-repeat",
@@ -298,17 +325,18 @@ class Generator:
             if fills:
                 main["background-color"] = background([{**fills[-1], "opacity": 1}]).get("background-color", "#ffffff")
             attrs.append('aria-hidden="true"')
-            self.expect.append({"id": e.node["id"], "kind": "svg", "box": [e.x, e.y, e.w, e.h], "asset": f})
+            self.expect.append({"id": e.node["id"], "kind": "svg", "box": [bx, by, bw, bh], "asset": f})
         elif e.kind in ("image", "svg"):
             tag = "img"
             icon = e.kind == "svg" and max(e.w, e.h) <= ICON_MAX
             role = "icon" if icon else ("graphic" if e.kind == "svg" else "image")
             f = self.image_file(e.asset, e.w, e.h)
+            bx, by, bw, bh = self._draw_box(e)
             alt = "" if e.kind == "svg" else html.escape(e.name)
-            attrs += [f'src="images/{f}"', f'alt="{alt}"', f'width="{round(e.w)}"', f'height="{round(e.h)}"']
+            attrs += [f'src="images/{f}"', f'alt="{alt}"', f'width="{round(bw)}"', f'height="{round(bh)}"']
             if e.y > 900:
                 attrs.append('loading="lazy"')
-            main.update({"width": px(e.w), "height": px(e.h), "flex-shrink": "0"})
+            main.update({"width": px(bw), "height": px(bh), "flex-shrink": "0"})
             if e.kind == "image":
                 mode = next(
                     (p.get("scaleMode") for p in (e.node or {}).get("fills", []) if p.get("type") == "IMAGE"),
@@ -316,7 +344,7 @@ class Generator:
                 )
                 main["object-fit"] = {"FIT": "contain", "TILE": "none"}.get(mode, "cover")
             main.update(self.visual(e))
-            self.expect.append({"id": e.node["id"], "kind": e.kind, "box": [e.x, e.y, e.w, e.h], "asset": f})
+            self.expect.append({"id": e.node["id"], "kind": e.kind, "box": [bx, by, bw, bh], "asset": f})
         elif e.kind == "shape":
             main.update({"width": px(e.w), "height": px(e.h), "flex-shrink": "0"})
             main.update(self.visual(e))
@@ -328,7 +356,8 @@ class Generator:
             if e.kind == "section":
                 role = e.role or "section"
                 tag = e.tag or "section"
-                main.update({"position": "relative", "overflow": "hidden", "min-height": px(e.h)})
+                # No clipping: like Figma, layers may extend past the section and later sections paint over them.
+                main.update({"position": "relative", "min-height": px(e.h)})
                 main.update(self.visual(e))
                 attrs.append(f'data-section="{html.escape(e.role or "")}"')
             elif e.kind == "container":
@@ -392,8 +421,11 @@ class Generator:
             inner = "\n" + "\n".join(parts) + "\n" + ind
 
         main.update(placement)
+        if e.bleed:
+            self._apply_bleed(e, main)
         cls = self.class_for(role, css)
-        extra = ' class="' + cls + (" l-row" if e.layout.get("mode") == "row" else "") + '"'
+        utility = (" l-row" if e.layout.get("mode") == "row" else "") + (" t-lock" if e.kind == "text" else "")
+        extra = ' class="' + cls + utility + '"'
         a = (" " + " ".join(attrs)) if attrs else ""
         if tag == "img":
             return f"{ind}<img{extra}{a}>"
@@ -409,14 +441,12 @@ class Generator:
             d["text-align"] = {"CENTER": "center", "RIGHT": "right", "JUSTIFIED": "justify"}[align]
         d["margin"] = "0"
         resize = n.get("textAutoResize")
-        if resize in ("HEIGHT", "NONE", "TRUNCATE"):
-            d["width"] = px(e.w)
-            d["max-width"] = "100%"
-            d["white-space"] = "pre-wrap"
-            if resize == "NONE":
-                d["height"] = px(e.h)
-        else:
-            d["white-space"] = "pre"
+        # Blueprint lock: every text box keeps its Figma size on desktop, so a line that renders a
+        # pixel taller (or a fallback font) cannot push the rest of the page. Released on mobile.
+        d["width"] = px(e.w)
+        d["height"] = px(e.h)
+        d["max-width"] = "100%"
+        d["white-space"] = "pre-wrap" if resize in ("HEIGHT", "NONE", "TRUNCATE") else "pre"
         d["flex-shrink"] = "0"
         d.update(self.visual(e))
         return d
@@ -522,20 +552,25 @@ class Generator:
         fonts, faces, google = [], [], []
         font_out = out_dir / "fonts"
         for family, variants in sorted(used.items()):
-            fslug = slug(family, "font")
+            available = fontfiles.find(self.font_dir, family)
             missing = []
             for weight, style in sorted(variants):
-                fname = f"{fslug}-latin-{weight}-{style}.woff2"
-                src = (self.font_dir / fslug / fname) if self.font_dir else None
-                if src and src.exists():
+                f = fontfiles.pick(available, weight, style)
+                if f:
+                    fname = f"{slug(family, 'font')}-{f.weight if not f.variable else 'var'}-{f.style}{f.path.suffix}"
                     font_out.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(src, font_out / fname)
+                    if not (font_out / fname).exists():
+                        shutil.copyfile(f.path, font_out / fname)
+                    face_weight = "100 900" if f.variable else str(weight)
                     faces.append(
                         f"@font-face {{\n  font-family: '{family}';\n  font-style: {style};\n"
-                        f"  font-weight: {weight};\n  font-display: swap;\n"
-                        f"  src: url('../fonts/{fname}') format('woff2');\n}}"
+                        f"  font-weight: {face_weight};\n  font-display: swap;\n"
+                        f"  src: url('../fonts/{fname}') format('{f.fmt}');\n}}"
                     )
-                    fonts.append({"family": family, "weight": weight, "style": style, "source": "self-hosted"})
+                    note = "self-hosted" if (f.variable or f.weight == weight) else f"self-hosted (nearest: {f.weight})"
+                    fonts.append({"family": family, "weight": weight, "style": style, "source": note})
+                    if not f.variable and f.weight != weight:
+                        self.warnings.append(f"{family} {weight}: no exact file, using weight {f.weight}.")
                 else:
                     missing.append((weight, style))
                     fonts.append({"family": family, "weight": weight, "style": style, "source": "google-fonts"})
@@ -602,13 +637,14 @@ class Generator:
             "body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }\n"
             "img { display: block; max-width: 100%; }\n"
             "a { color: inherit; }\n"
-            "main { overflow-x: hidden; }"
+            "main { overflow-x: clip; }"
         )
         responsive = (
             "/* Inferred mobile layout: rows stack below 768px (no mobile frame was supplied). */\n"
             "@media (max-width: 767px) {\n"
             "  .l-row { flex-direction: column; flex-wrap: wrap; align-items: center; }\n"
             "  .l-row > * { margin-left: 0; }\n"
+            "  .t-lock { height: auto; white-space: pre-wrap; }\n"
             "  img { height: auto; }\n"
             "}"
         )

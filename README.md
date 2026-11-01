@@ -58,12 +58,16 @@ In the Figma desktop app, open a design file, press **Cmd + /**, run **Import pl
 
 The plugin can only reach `http://localhost:8000` during development (see `networkAccess` in the manifest). **Settings and advanced** in the plugin has export-only, upload-only and JSON download.
 
+## Fonts
+
+Free Google fonts load automatically. For any other font (for example a paid font such as TT Hoves), the result shows **Missing fonts**: pick the font files in the plugin and click **Upload fonts and convert again**. You can also copy the files into `engine/data/fonts/<family-name>/` yourself. Until a font is available the page uses a fallback font and the score is capped, so it never silently claims a match.
+
 ## Settings (environment variables)
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ENGINE_DATA_DIR` | `engine/data` | Where bundles and outputs are stored |
-| `ENGINE_FONT_DIR` | `engine/data/fonts` | Self-hosted fonts: `<family>/<family>-latin-<weight>-<normal\|italic>.woff2` (Fontsource naming). Missing fonts load from Google Fonts. |
+| `ENGINE_FONT_DIR` | `engine/data/fonts` | Self-hosted fonts, one folder per family (`tt-hoves/TTHoves-Bold.otf`, any naming with a weight word; .woff2/.woff/.otf/.ttf; variable fonts supported). Fonts not found here load from Google Fonts. |
 | `ENGINE_CHROMIUM_PATH` | Playwright's Chromium | Use a specific Chrome/Chromium binary for the comparison |
 | `ENGINE_PUBLIC_URL` | `http://localhost:8000` | Base URL used in links returned to the plugin |
 
@@ -97,6 +101,8 @@ The full browser test runs only when Chromium is installed; otherwise it is skip
 | GET | `/v1/bundles/{id}/output/{path}` | Live preview of the generated site |
 | GET | `/v1/bundles/{id}/fidelity/{path}` | Fidelity report and images |
 | GET | `/v1/bundles/{id}/code.zip` | Download the generated code |
+| GET | `/v1/fonts` | Font families available for self-hosting |
+| PUT | `/v1/fonts/{family}/{filename}` | Upload a font file (.woff2, .woff, .otf, .ttf; max 15 MB) |
 
 ## Changing the bundle contract
 

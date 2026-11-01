@@ -50,7 +50,8 @@ COLLECT_JS = """
     const r = s.getBoundingClientRect();
     return { name: s.dataset.section, y: r.top + window.scrollY, h: r.height };
   });
-  return { elements: out, sections, height: document.documentElement.scrollHeight };
+  const loaded = [...document.fonts].filter(f => f.status === 'loaded').map(f => f.family.replace(/["']/g, ''));
+  return { elements: out, sections, height: document.documentElement.scrollHeight, fonts: [...new Set(loaded)] };
 }
 """
 
@@ -111,6 +112,16 @@ def _same_color(expected: str, actual: str) -> bool:
     return all(abs(e[i] - a[i]) <= COLOR_TOL for i in range(3)) and abs(e[3] - a[3]) <= 0.05
 
 
+SYSTEM_FONTS = {
+    "arial", "helvetica", "helvetica neue", "times new roman", "times", "georgia", "verdana", "tahoma",
+    "trebuchet ms", "courier new", "courier", "system-ui", "sans-serif", "serif", "monospace",
+}  # fmt: skip
+
+
+def _font_available(family: str, loaded: set[str]) -> bool:
+    return family.lower() in loaded or family.lower() in SYSTEM_FONTS
+
+
 def _tol(size: float, ratio: float, floor: float) -> float:
     return max(floor, size * ratio)
 
@@ -150,6 +161,8 @@ def verify(
             browser.close()
 
     got = data["elements"]
+    loaded_fonts = {f.lower() for f in data.get("fonts", [])}
+    missing_fonts: dict[str, list[str]] = {}
     issues: list[dict] = []
     geom_ok = geom_n = 0
     typo_ok = typo_n = 0
@@ -184,7 +197,9 @@ def verify(
             typo_n += 1
             st = exp.get("style", {})
             fam = st.get("font-family", "").strip("'").lower()
-            fam_ok = not fam or fam in a["fontFamily"].lower()
+            fam_ok = not fam or (fam in a["fontFamily"].lower() and _font_available(fam, loaded_fonts))
+            if fam and not _font_available(fam, loaded_fonts):
+                missing_fonts.setdefault(st["font-family"].strip("'"), []).append(nid)
             size_ok = not st.get("font-size") or abs(float(a["fontSize"][:-2]) - float(st["font-size"][:-2])) < 0.6
             weight_ok = not st.get("font-weight") or a["fontWeight"] == st["font-weight"]
             lh = exp.get("lineHeight")
@@ -248,9 +263,15 @@ def verify(
         "M": 100.0,  # no motion specs in v0.2 inputs
         "R": 100 * sum(not v for v in overflow.values()) / len(overflow),
     }
+    for family, nodes_using in sorted(missing_fonts.items()):
+        issues.append({
+            "severity": "critical", "category": "font", "id": nodes_using[0], "name": family,
+            "message": f"Font '{family}' is not available, so a fallback font was used ({len(nodes_using)} text layers). "
+                       "Add the font files and convert again.",
+        })  # fmt: skip
     score = sum(WEIGHTS[k] * v for k, v in sub.items())
     if any(i["severity"] == "critical" for i in issues):
-        score = min(score, 69.0)
+        score = min(score, 69.0)  # SRS §16: a critical issue caps the score
     for w, bad in overflow.items():
         if bad:
             issues.append({"severity": "minor", "category": "responsive", "id": None, "name": f"{w}px",
@@ -283,6 +304,7 @@ def verify(
         "renderHeight": data["height"],
         "designHeight": page.height,
         "overflow": {str(k): v for k, v in overflow.items()},
+        "missingFonts": sorted(missing_fonts),
         "issues": issues,
     }
     (fidelity_dir / "fidelity.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

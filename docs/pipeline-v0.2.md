@@ -21,6 +21,21 @@
 - Browsers refuse CSS masks loaded from `file://`; inline small SVGs as data URIs.
 - A high score can hide one missing element: section-level visual similarity is what caught the missing frosted shape.
 
+## v0.2.1: blueprint fixes from the second real file
+
+Second file (services landing page, 1903×3754, 24 SVG graphics, TT Hoves + Poppins) scored 68.1 on the user's Mac with only 9/78 elements in place. Causes and fixes:
+
+| Problem | Fix |
+| --- | --- |
+| A full-width background started half-way down a card row; the section was split there, cards were clipped and everything below moved down about 190 px | Section edges are top/bottom edges of full-width shapes, used only when **no content crosses them**; bottom edges hidden under another background are ignored; groups that span two sections are dissolved so each child lands where it really is; empty bands merge upwards |
+| Full-width shapes starting mid-section stayed in the flow | Every full-width shape, image or graphic in a section is a background layer, at its exact position |
+| Sections clipped their content (`overflow: hidden`) | No clipping: layers may extend past a section, later sections paint over them, as in Figma |
+| One taller line of text pushes the whole page | **Blueprint lock**: every text box keeps its Figma width and height on desktop (`.t-lock`), released below 768 px |
+| SVGs with shadows were squeezed into the layer box (Figma exports at render bounds) | SVGs are drawn at their render bounds with negative margins, so they occupy exactly the layer box |
+| TT Hoves (not a Google font) silently fell back to another font while Typography said 100 | The checker now confirms each font actually **loaded**; a missing font is a critical issue (score capped at 69). The plugin shows a "Missing fonts" panel to upload the files and convert again. Font files are found whatever their naming (`TTHoves-Bold.otf`, Fontsource names, variable fonts) |
+
+Result after fixes: **78/78 elements in place, 97.3% visual similarity**; the remaining gap is the missing TT Hoves font. The first file still scores 99.8.
+
 ## Known limits (next steps)
 
 1. **Mobile frames:** the generator uses the desktop frame; a mobile frame is read but not yet merged into media queries (desktop/mobile element matching, FR-EXT-14).
@@ -28,4 +43,4 @@
 3. **Interactions and motion:** hover variants, Smart Animate and the Motion panel are not generated yet (FR-MOT).
 4. **Auto-fix loop:** issues are reported but not yet patched automatically (FR-FID-17 to 24).
 5. **Semantics:** form fields drawn as rectangles stay `div`s; heading levels are inferred from size.
-6. **Tested on one flat file so far.** Next test files: one with Auto Layout and components, one with a mobile frame.
+6. **Tested on two flat files so far.** Next test files: one with Auto Layout and components, one with a mobile frame.
