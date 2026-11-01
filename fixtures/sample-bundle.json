@@ -698,7 +698,19 @@
         "width": 300,
         "height": 300
       },
-      "fills": [],
+      "fills": [
+        {
+          "type": "SOLID",
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "NORMAL",
+          "color": {
+            "r": 0.95,
+            "g": 0.95,
+            "b": 0.97
+          }
+        }
+      ],
       "strokes": [],
       "cornerRadius": 12
     },
@@ -722,7 +734,19 @@
         "width": 300,
         "height": 300
       },
-      "fills": [],
+      "fills": [
+        {
+          "type": "SOLID",
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "NORMAL",
+          "color": {
+            "r": 0.95,
+            "g": 0.95,
+            "b": 0.97
+          }
+        }
+      ],
       "strokes": [],
       "cornerRadius": 12
     },
@@ -1481,7 +1505,19 @@
         "width": 300,
         "height": 300
       },
-      "fills": [],
+      "fills": [
+        {
+          "type": "SOLID",
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "NORMAL",
+          "color": {
+            "r": 0.95,
+            "g": 0.95,
+            "b": 0.97
+          }
+        }
+      ],
       "strokes": [],
       "cornerRadius": 12
     },
@@ -1505,7 +1541,19 @@
         "width": 300,
         "height": 300
       },
-      "fills": [],
+      "fills": [
+        {
+          "type": "SOLID",
+          "visible": true,
+          "opacity": 1,
+          "blendMode": "NORMAL",
+          "color": {
+            "r": 0.95,
+            "g": 0.95,
+            "b": 0.97
+          }
+        }
+      ],
       "strokes": [],
       "cornerRadius": 12
     },

@@ -1,11 +1,14 @@
-// Plugin UI: role assignment, export trigger, upload to the Engine, report summary.
+// Plugin UI: one-click Convert (read → upload → generate + verify), results, and advanced tools.
 import type { Bundle, FrameRole, MainToUi, SelectedFrame, UiToMain } from './types.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const framesEl = $('frames');
 const ignoredEl = $('ignored');
 const statusEl = $('status');
+const resultEl = $('result');
 const reportEl = $('report');
+const stepsEl = $('steps');
+const convertBtn = $<HTMLButtonElement>('convert');
 const exportBtn = $<HTMLButtonElement>('export');
 const uploadBtn = $<HTMLButtonElement>('upload');
 const downloadBtn = $<HTMLButtonElement>('download');
@@ -15,6 +18,8 @@ let frames: SelectedFrame[] = [];
 const roles: Record<string, FrameRole | 'skip'> = {};
 let bundle: Bundle | null = null;
 const assets = new Map<string, Uint8Array>();
+let busy = false;
+let exportWaiter: { resolve: () => void; reject: (e: Error) => void } | null = null;
 
 try {
   const saved = localStorage.getItem('engineUrl');
@@ -32,6 +37,30 @@ function setStatus(text: string, isError = false) {
 
 function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+}
+
+function engineBase() {
+  const base = engineInput.value.replace(/\/+$/, '');
+  try { localStorage.setItem('engineUrl', base); } catch { /* ignore */ }
+  return base;
+}
+
+function setStep(step: string | null) {
+  stepsEl.hidden = step === null && stepsEl.hidden;
+  let reached = false;
+  stepsEl.querySelectorAll<HTMLElement>('li').forEach((li) => {
+    li.className = '';
+    if (step === 'done') { li.className = 'done'; return; }
+    if (li.dataset.step === step) { li.className = 'active'; reached = true; }
+    else if (!reached && step) li.className = 'done';
+  });
+}
+
+function updateButtons() {
+  convertBtn.disabled = busy || frames.length === 0;
+  exportBtn.disabled = busy || frames.length === 0;
+  uploadBtn.disabled = busy || !bundle;
+  downloadBtn.disabled = busy || !bundle;
 }
 
 function renderFrames(ignored: string[]) {
@@ -59,7 +88,7 @@ function renderFrames(ignored: string[]) {
     }
   }
   ignoredEl.textContent = ignored.length ? `Ignored (not frames): ${ignored.join(', ')}` : '';
-  exportBtn.disabled = frames.length === 0;
+  updateButtons();
 }
 
 function chosenRoles(): Record<string, FrameRole> {
@@ -71,16 +100,174 @@ function chosenRoles(): Record<string, FrameRole> {
   return out;
 }
 
-exportBtn.onclick = () => {
+// ------------------------------------------------------------------ steps
+function exportDesign(): Promise<void> {
   bundle = null;
   assets.clear();
-  uploadBtn.disabled = true;
-  downloadBtn.disabled = true;
-  reportEl.innerHTML = '';
-  exportBtn.disabled = true;
-  setStatus('Starting export…');
-  send({ type: 'export', roles: chosenRoles() });
+  return new Promise((resolve, reject) => {
+    exportWaiter = { resolve, reject };
+    send({ type: 'export', roles: chosenRoles() });
+  });
+}
+
+async function uploadBundle(): Promise<string> {
+  if (!bundle) throw new Error('Nothing exported yet.');
+  const base = engineBase();
+  let res: Response;
+  try {
+    res = await fetch(`${base}/v1/bundles`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundle),
+    });
+  } catch {
+    throw new Error(`Can't reach the Engine at ${base}. Is it running?`);
+  }
+  if (!res.ok) throw new Error(`Engine rejected the design (${res.status}): ${await res.text()}`);
+  const { bundleId } = (await res.json()) as { bundleId: string };
+  let i = 0;
+  for (const [id, bytes] of assets) {
+    i += 1;
+    setStatus(`Uploading images ${i}/${assets.size}…`);
+    const put = await fetch(`${base}/v1/bundles/${bundleId}/assets/${encodeURIComponent(id)}`, {
+      method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: bytes as unknown as BodyInit,
+    });
+    if (!put.ok) throw new Error(`Image ${id} failed (${put.status}): ${await put.text()}`);
+  }
+  return bundleId;
+}
+
+async function loadDesignCheck(bundleId: string) {
+  const rep = await fetch(`${engineBase()}/v1/bundles/${bundleId}/report`);
+  if (rep.ok) renderDesignCheck(await rep.json());
+}
+
+interface Conversion {
+  bundleId: string;
+  seconds: number;
+  previewUrl: string;
+  reportUrl: string;
+  zipUrl: string;
+  assumptions: string[];
+  warnings: string[];
+  fidelity: null | {
+    score: number;
+    band: string;
+    subScores: Record<string, number>;
+    counts: Record<string, number>;
+    sections: { section: string; ssim: number }[];
+    topIssues: { severity: string; category: string; name: string | null; message: string; id: string | null }[];
+  };
+}
+
+async function generate(bundleId: string): Promise<Conversion> {
+  const res = await fetch(`${engineBase()}/v1/bundles/${bundleId}/convert`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Conversion failed (${res.status}): ${await res.text()}`);
+  return (await res.json()) as Conversion;
+}
+
+// ------------------------------------------------------------------ rendering
+const LABELS: Record<string, string> = {
+  G: 'Layout & positions', T: 'Typography', C: 'Colours', A: 'Images & icons', S: 'Visual similarity', M: 'Motion', R: 'Responsive',
 };
+
+function renderResult(r: Conversion) {
+  const f = r.fidelity;
+  const band = f ? f.band.split(' ')[0] : '';
+  const scoreHtml = f
+    ? `<div class="score"><b class="${band}">${f.score.toFixed(1)}</b><span class="band ${band}">${escapeHtml(f.band)}</span></div>
+       <div class="note">${f.counts.geometryPass}/${f.counts.elements} elements in place · ${f.counts.critical} critical, ${f.counts.major} major, ${f.counts.minor} minor issues · ${r.seconds.toFixed(1)} s</div>
+       <table>${Object.entries(f.subScores).filter(([k]) => k !== 'M').map(([k, v]) => `<tr><td>${LABELS[k] ?? k}</td><td class="v">${Math.round(v)}</td></tr>`).join('')}</table>`
+    : `<div class="score"><b>✓</b><span class="band">Code generated</span></div><div class="note">The design check was skipped.</div>`;
+  const issues = f && f.topIssues.length
+    ? `<h2>Top issues</h2>${f.topIssues.slice(0, 5).map((i, idx) => `<div class="finding ${i.severity}" data-idx="${idx}"><strong>${escapeHtml(i.name ?? i.category)}</strong> ${escapeHtml(i.message)}</div>`).join('')}`
+    : '';
+  const notes = [...r.assumptions, ...r.warnings].map((n) => `<div class="note">• ${escapeHtml(n)}</div>`).join('');
+  resultEl.innerHTML = `<div class="result">${scoreHtml}
+    <div class="row"><button id="open-preview">Open preview</button><button id="open-report" class="secondary">Report</button><button id="get-code" class="secondary">Download code</button></div>
+    ${notes}${issues}</div>`;
+  $('open-preview').onclick = () => send({ type: 'open-url', url: r.previewUrl });
+  $('open-report').onclick = () => send({ type: 'open-url', url: r.reportUrl });
+  $('get-code').onclick = () => send({ type: 'open-url', url: r.zipUrl });
+  if (f) {
+    resultEl.querySelectorAll<HTMLElement>('.finding').forEach((el) => {
+      const id = f.topIssues[Number(el.dataset.idx)].id;
+      if (id) {
+        el.style.cursor = 'pointer';
+        el.title = 'Select this layer in Figma';
+        el.onclick = () => send({ type: 'select-node', nodeId: id });
+      }
+    });
+  }
+}
+
+interface DesignCheck {
+  summary: { nodeCount: number };
+  layout: { autoLayoutCoverage: number };
+  responsive: { sectionsByRole: Record<string, number>; sections: Record<string, { heading: string | null }[]> };
+  findings: { severity: string; code: string; message: string; nodeIds?: string[] }[];
+}
+
+function renderDesignCheck(r: DesignCheck) {
+  const secs = Object.entries(r.responsive.sectionsByRole)
+    .map(([role, n]) => `${role}: ${n} (${(r.responsive.sections[role] ?? []).map((s) => escapeHtml(s.heading?.split('\n')[0] ?? '–')).join(' · ')})`)
+    .join('<br>');
+  const findings = r.findings
+    .map((f, idx) => `<div class="finding ${f.severity}" data-idx="${idx}"><strong>${escapeHtml(f.code)}</strong> ${escapeHtml(f.message)}</div>`)
+    .join('');
+  reportEl.innerHTML = `<details><summary>Design check: ${r.summary.nodeCount} layers · Auto Layout ${Math.round(r.layout.autoLayoutCoverage * 100)}% · ${r.findings.length} tips</summary>
+    <div class="note">Sections found: ${secs}</div>${findings}</details>`;
+  reportEl.querySelectorAll<HTMLElement>('.finding').forEach((el) => {
+    const nodeId = r.findings[Number(el.dataset.idx)].nodeIds?.[0];
+    if (nodeId) {
+      el.style.cursor = 'pointer';
+      el.onclick = () => send({ type: 'select-node', nodeId });
+    }
+  });
+}
+
+// ------------------------------------------------------------------ actions
+async function run(task: () => Promise<void>) {
+  if (busy) return;
+  busy = true;
+  updateButtons();
+  try {
+    await task();
+  } catch (e) {
+    setStatus(e instanceof Error ? e.message : String(e), true);
+  } finally {
+    busy = false;
+    updateButtons();
+  }
+}
+
+convertBtn.onclick = () => run(async () => {
+  resultEl.innerHTML = '';
+  reportEl.innerHTML = '';
+  stepsEl.hidden = false;
+  setStep('read');
+  setStatus('Reading the design…');
+  await exportDesign();
+  setStep('upload');
+  setStatus('Uploading…');
+  const id = await uploadBundle();
+  void loadDesignCheck(id);
+  setStep('generate');
+  setStatus('Generating code and comparing it with your design (a few seconds)…');
+  const r = await generate(id);
+  setStep('done');
+  setStatus('');
+  renderResult(r);
+});
+
+exportBtn.onclick = () => run(async () => {
+  setStatus('Reading the design…');
+  await exportDesign();
+});
+
+uploadBtn.onclick = () => run(async () => {
+  const id = await uploadBundle();
+  await loadDesignCheck(id);
+  setStatus(`Uploaded as ${id}.`);
+});
 
 downloadBtn.onclick = () => {
   if (!bundle) return;
@@ -91,83 +278,6 @@ downloadBtn.onclick = () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
-
-uploadBtn.onclick = async () => {
-  if (!bundle) return;
-  const base = engineInput.value.replace(/\/+$/, '');
-  try { localStorage.setItem('engineUrl', base); } catch { /* ignore */ }
-  uploadBtn.disabled = true;
-  try {
-    setStatus('Uploading bundle…');
-    const res = await fetch(`${base}/v1/bundles`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundle),
-    });
-    if (!res.ok) throw new Error(`Engine rejected the bundle (${res.status}): ${await res.text()}`);
-    const { bundleId } = (await res.json()) as { bundleId: string };
-
-    let i = 0;
-    for (const [id, bytes] of assets) {
-      i += 1;
-      setStatus(`Uploading assets ${i}/${assets.size}…`);
-      const put = await fetch(`${base}/v1/bundles/${bundleId}/assets/${encodeURIComponent(id)}`, {
-        method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: bytes as unknown as BodyInit,
-      });
-      if (!put.ok) throw new Error(`Asset ${id} failed (${put.status}): ${await put.text()}`);
-    }
-
-    setStatus('Building extraction report…');
-    const rep = await fetch(`${base}/v1/bundles/${bundleId}/report`);
-    if (!rep.ok) throw new Error(`Report failed (${rep.status})`);
-    renderReport(bundleId, await rep.json());
-    setStatus(`Uploaded as ${bundleId}.`);
-  } catch (e) {
-    setStatus(String(e instanceof Error ? e.message : e), true);
-  } finally {
-    uploadBtn.disabled = false;
-  }
-};
-
-interface Report {
-  summary: Record<string, unknown> & { nodeCount: number; assetUploaded: number; assetDeclared: number };
-  layout: { autoLayoutCoverage: number };
-  text: { textNodes: number; fonts: { family: string; style: string }[] };
-  interactions: { nodesWithReactions: number };
-  fieldCoverage: { ratio: number };
-  responsive: { sectionsByRole: Record<string, number>; sections: Record<string, { heading: string | null }[]> };
-  findings: { severity: 'error' | 'warning' | 'info'; code: string; message: string; nodeIds?: string[] }[];
-}
-
-function renderReport(bundleId: string, r: Report) {
-  const pct = (x: number) => `${Math.round(x * 100)}%`;
-  const rows: [string, string][] = [
-    ['Layers', String(r.summary.nodeCount)],
-    ['Auto Layout coverage', pct(r.layout.autoLayoutCoverage)],
-    ['Field coverage', pct(r.fieldCoverage.ratio)],
-    ...Object.entries(r.responsive.sectionsByRole).map(([role, n]): [string, string] => [
-      `Sections (${role})`,
-      `${n}: ${(r.responsive.sections[role] ?? []).map((s) => s.heading?.split('\n')[0] ?? '–').join(' · ')}`,
-    ]),
-    ['Text layers', String(r.text.textNodes)],
-    ['Fonts', String(r.text.fonts.length)],
-    ['Layers with interactions', String(r.interactions.nodesWithReactions)],
-    ['Assets uploaded', `${r.summary.assetUploaded}/${r.summary.assetDeclared}`],
-  ];
-  const findings = r.findings.length
-    ? r.findings.map((f, idx) => `<div class="finding ${f.severity}" data-idx="${idx}"><strong>${escapeHtml(f.code)}</strong> ${escapeHtml(f.message)}</div>`).join('')
-    : '<div class="empty">No findings.</div>';
-  reportEl.innerHTML = `<h2>Extraction report · ${escapeHtml(bundleId)}</h2>
-    <table>${rows.map(([k, v]) => `<tr><td>${k}</td><td class="v">${v}</td></tr>`).join('')}</table>
-    <h2>Findings</h2>${findings}`;
-  reportEl.querySelectorAll<HTMLElement>('.finding').forEach((el) => {
-    const f = r.findings[Number(el.dataset.idx)];
-    const nodeId = f.nodeIds?.[0];
-    if (nodeId) {
-      el.style.cursor = 'pointer';
-      el.title = 'Select the first affected layer';
-      el.onclick = () => send({ type: 'select-node', nodeId });
-    }
-  });
-}
 
 window.onmessage = (event: MessageEvent) => {
   const msg = event.data?.pluginMessage as MainToUi | undefined;
@@ -187,14 +297,18 @@ window.onmessage = (event: MessageEvent) => {
       assets.set(msg.id, msg.bytes);
       break;
     case 'done':
-      exportBtn.disabled = false;
-      uploadBtn.disabled = false;
-      downloadBtn.disabled = false;
-      setStatus(`Exported ${msg.nodeCount} layers and ${msg.assetCount} assets in ${(msg.ms / 1000).toFixed(1)} s.`);
+      setStatus(`Read ${msg.nodeCount} layers and ${msg.assetCount} images in ${(msg.ms / 1000).toFixed(1)} s.`);
+      exportWaiter?.resolve();
+      exportWaiter = null;
+      updateButtons();
       break;
     case 'error':
-      exportBtn.disabled = frames.length === 0;
-      setStatus(msg.message, true);
+      if (exportWaiter) {
+        exportWaiter.reject(new Error(msg.message));
+        exportWaiter = null;
+      } else {
+        setStatus(msg.message, true);
+      }
       break;
   }
 };

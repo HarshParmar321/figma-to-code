@@ -13,6 +13,8 @@ WHITE = [{"type": "SOLID", "visible": True, "opacity": 1, "blendMode": "NORMAL",
 BRAND = [{"type": "SOLID", "visible": True, "opacity": 1, "blendMode": "NORMAL",
           "color": {"r": 0.31, "g": 0.27, "b": 0.9},
           "boundVariables": {"color": {"type": "VARIABLE_ALIAS", "id": "VariableID:1:1"}}}]
+CARD = [{"type": "SOLID", "visible": True, "opacity": 1, "blendMode": "NORMAL",
+         "color": {"r": 0.95, "g": 0.95, "b": 0.97}}]
 IMAGE_HASH = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
 
 nodes: dict[str, dict] = {}
@@ -105,9 +107,9 @@ def page(prefix, role, width, height, ox):
 
     # A group (no layout data) to exercise the GROUPS_WITH_CHILDREN finding.
     add(f"{p}:20", "Features", "GROUP", f"{p}:1", 0, 632, width, 300, ox, 632)
-    add(f"{p}:21", "Card 1", "RECTANGLE", f"{p}:20", pad, 0, 300, 300, ox + pad, 632, cornerRadius=12)
+    add(f"{p}:21", "Card 1", "RECTANGLE", f"{p}:20", pad, 0, 300, 300, ox + pad, 632, cornerRadius=12, fills=CARD)
     add(f"{p}:22", "Card 2", "RECTANGLE", f"{p}:20", pad + 332, 0, 300, 300, ox + pad + 332, 632,
-        cornerRadius=12)
+        cornerRadius=12, fills=CARD)
 
     add(f"{p}:30", "Footer", "FRAME", f"{p}:1", 0, height - 120, width, 120, ox, height - 120,
         **auto("HORIZONTAL", 16, (40, pad, 40, pad)))

@@ -74,5 +74,23 @@ class BundleStore:
         (d / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return stored
 
+    def bundle_dir(self, bundle_id: str) -> Path:
+        d = self._dir(bundle_id)
+        if not d.exists():
+            raise NotFound(bundle_id)
+        return d
+
+    def safe_file(self, bundle_id: str, subdir: str, rel: str) -> Path:
+        """A file inside <bundle>/<subdir>, refusing any path that escapes it."""
+        base = (self.bundle_dir(bundle_id) / subdir).resolve()
+        target = (base / rel).resolve()
+        if base != target and base not in target.parents:
+            raise NotFound(rel)
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
+            raise NotFound(rel)
+        return target
+
     def save_report(self, bundle_id: str, report: dict) -> None:
         (self._dir(bundle_id) / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

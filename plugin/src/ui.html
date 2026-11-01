@@ -9,53 +9,78 @@
     margin: 0; padding: 16px; font: 12px/1.5 Inter, system-ui, sans-serif;
     color: var(--figma-color-text, #222); background: var(--figma-color-bg, #fff);
   }
-  h1 { font-size: 14px; margin: 0 0 4px; }
-  h2 { font-size: 12px; margin: 16px 0 8px; text-transform: uppercase; letter-spacing: .04em; color: var(--figma-color-text-secondary, #666); }
+  h1 { font-size: 14px; margin: 0 0 2px; }
+  h2 { font-size: 11px; margin: 16px 0 8px; text-transform: uppercase; letter-spacing: .05em; color: var(--figma-color-text-secondary, #666); }
   p.hint { margin: 0 0 12px; color: var(--figma-color-text-secondary, #666); }
   .frame { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--figma-color-border, #e5e5e5); border-radius: 6px; margin-bottom: 6px; }
   .frame .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .frame .size { color: var(--figma-color-text-secondary, #666); font-variant-numeric: tabular-nums; }
   select, input { font: inherit; padding: 4px 6px; border-radius: 4px; border: 1px solid var(--figma-color-border, #ccc); background: var(--figma-color-bg, #fff); color: inherit; }
   input { width: 100%; }
-  .row { display: flex; gap: 8px; margin-top: 12px; }
-  button { flex: 1; font: inherit; font-weight: 600; padding: 8px 10px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  button { flex: 1; font: inherit; font-weight: 600; padding: 9px 10px; border-radius: 6px; border: 1px solid transparent; cursor: pointer;
     background: var(--figma-color-bg-brand, #0d99ff); color: var(--figma-color-text-onbrand, #fff); }
   button.secondary { background: transparent; color: inherit; border-color: var(--figma-color-border, #ccc); }
   button:disabled { opacity: .45; cursor: default; }
-  #status { margin-top: 12px; min-height: 18px; color: var(--figma-color-text-secondary, #666); }
+  #convert { font-size: 13px; padding: 11px; }
+  .steps { list-style: none; padding: 0; margin: 12px 0 0; }
+  .steps li { display: flex; gap: 8px; align-items: center; padding: 3px 0; color: var(--figma-color-text-secondary, #888); }
+  .steps li::before { content: ''; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; flex: none; }
+  .steps li.active { color: var(--figma-color-text, #222); font-weight: 600; }
+  .steps li.active::before { background: var(--figma-color-bg-brand, #0d99ff); border-color: var(--figma-color-bg-brand, #0d99ff); }
+  .steps li.done { color: var(--figma-color-text, #222); }
+  .steps li.done::before { background: var(--figma-color-text-success, #14ae5c); border-color: var(--figma-color-text-success, #14ae5c); }
+  #status { margin-top: 10px; min-height: 18px; color: var(--figma-color-text-secondary, #666); }
   #status.error { color: var(--figma-color-text-danger, #d22); }
-  #report { margin-top: 8px; }
-  table { width: 100%; border-collapse: collapse; }
-  td { padding: 4px 0; border-bottom: 1px solid var(--figma-color-border, #eee); vertical-align: top; }
+  .result { margin-top: 12px; border: 1px solid var(--figma-color-border, #e5e5e5); border-radius: 8px; padding: 12px; }
+  .score { display: flex; align-items: baseline; gap: 8px; }
+  .score b { font-size: 34px; line-height: 1; }
+  .band { font-weight: 700; }
+  .band.Verified, .score b.Verified { color: var(--figma-color-text-success, #14ae5c); }
+  .band.Close, .score b.Close { color: var(--figma-color-text-brand, #0d99ff); }
+  .band.Needs, .score b.Needs { color: var(--figma-color-text-warning, #b86200); }
+  .band.Failed, .score b.Failed { color: var(--figma-color-text-danger, #d22); }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  td { padding: 3px 0; border-bottom: 1px solid var(--figma-color-border, #eee); vertical-align: top; }
   td.v { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
   .finding { padding: 6px 8px; border-radius: 4px; margin-bottom: 4px; background: var(--figma-color-bg-secondary, #f5f5f5); }
-  .finding.error { border-left: 3px solid var(--figma-color-border-danger, #d22); }
-  .finding.warning { border-left: 3px solid var(--figma-color-border-warning, #e6a700); }
-  .finding.info { border-left: 3px solid var(--figma-color-border, #ccc); }
+  .finding.error, .finding.critical { border-left: 3px solid var(--figma-color-border-danger, #d22); }
+  .finding.warning, .finding.major { border-left: 3px solid var(--figma-color-border-warning, #e6a700); }
+  .finding.info, .finding.minor { border-left: 3px solid var(--figma-color-border, #ccc); }
   .empty { color: var(--figma-color-text-secondary, #666); padding: 8px 0; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--figma-color-text-secondary, #666); font-weight: 600; }
+  .note { color: var(--figma-color-text-secondary, #666); margin-top: 6px; }
 </style>
 </head>
 <body>
-  <h1>Figma to Code · Spike 1</h1>
-  <p class="hint">Select a desktop frame and its mobile frame, check their roles, then export.</p>
+  <h1>Figma to Code</h1>
+  <p class="hint">Select a desktop frame (and its mobile frame if you have one), then convert.</p>
 
   <h2>Selected frames</h2>
   <div id="frames"><div class="empty">Select one or more frames on the canvas.</div></div>
   <div id="ignored" class="hint"></div>
 
-  <h2>Engine</h2>
-  <input id="engine" value="http://localhost:8000" spellcheck="false" />
-
-  <div class="row">
-    <button id="export" disabled>Export</button>
-  </div>
-  <div class="row">
-    <button id="upload" class="secondary" disabled>Upload to Engine</button>
-    <button id="download" class="secondary" disabled>Download JSON</button>
-  </div>
-
+  <button id="convert" disabled>Convert to code</button>
+  <ul class="steps" id="steps" hidden>
+    <li data-step="read">Read design</li>
+    <li data-step="upload">Upload</li>
+    <li data-step="generate">Generate HTML/CSS and check it against the design</li>
+  </ul>
   <div id="status"></div>
+  <div id="result"></div>
   <div id="report"></div>
+
+  <details>
+    <summary>Settings and advanced</summary>
+    <h2>Engine URL</h2>
+    <input id="engine" value="http://localhost:8000" spellcheck="false" />
+    <div class="row">
+      <button id="export" class="secondary" disabled>Export only</button>
+      <button id="upload" class="secondary" disabled>Upload only</button>
+      <button id="download" class="secondary" disabled>Download JSON</button>
+    </div>
+  </details>
   <!-- SCRIPT -->
 </body>
 </html>

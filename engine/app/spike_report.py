@@ -317,9 +317,7 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
 
     desktop_keys, mobile_keys = _keys("desktop"), set(_keys("mobile"))
     name_match = (
-        sum(1 for k in desktop_keys if k in mobile_keys) / len(desktop_keys)
-        if desktop_keys and mobile_keys
-        else 0.0
+        sum(1 for k in desktop_keys if k in mobile_keys) / len(desktop_keys) if desktop_keys and mobile_keys else 0.0
     )
     default_named = [s["id"] for ss in top_level.values() for s in ss if DEFAULT_NAME_RE.match(s["name"])]
     flat_roles = [
@@ -422,9 +420,7 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
     if unknown:
         finding("info", "UNKNOWN_NODE_TYPES", f"Node types not handled yet: {', '.join(unknown)}.")
     diag_codes = Counter(
-        (d["code"], d.get("severity", "warning"))
-        for d in bundle.get("diagnostics", [])
-        if d["code"] != "MISSING_FONT"
+        (d["code"], d.get("severity", "warning")) for d in bundle.get("diagnostics", []) if d["code"] != "MISSING_FONT"
     )
     for (code, severity), count in sorted(diag_codes.items()):
         ids = [d["nodeId"] for d in bundle["diagnostics"] if d["code"] == code and d.get("nodeId")]
@@ -441,15 +437,12 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
         "summary": {
             "nodeCount": len(nodes),
             "frames": [
-                {"role": f["role"], "name": f["name"], "width": f["width"], "height": f["height"]}
-                for f in frames
+                {"role": f["role"], "name": f["name"], "width": f["width"], "height": f["height"]} for f in frames
             ],
             "assetDeclared": len(declared),
             "assetUploaded": len(declared & uploaded) if uploaded_assets is not None else 0,
             "assetKinds": dict(asset_kinds),
-            "diagnosticCounts": dict(
-                Counter(d.get("severity", "warning") for d in bundle.get("diagnostics", []))
-            ),
+            "diagnosticCounts": dict(Counter(d.get("severity", "warning") for d in bundle.get("diagnostics", []))),
         },
         "nodeTypes": dict(types.most_common()),
         "layout": {
@@ -502,8 +495,7 @@ def build_report(bundle: dict, uploaded_assets: set[str] | None = None, bundle_i
             "topLevelLayersByRole": {role: len(k) for role, k in top_level.items()},
             "sectionNameMatchRatio": round(name_match, 4),
             "sections": {
-                role: [{k: v for k, v in s.items() if k != "nodeIds"} for s in ss]
-                for role, ss in sections.items()
+                role: [{k: v for k, v in s.items() if k != "nodeIds"} for s in ss] for role, ss in sections.items()
             },
         },
         "fieldCoverage": {
@@ -533,10 +525,8 @@ def to_markdown(r: dict) -> str:
         f"| Field coverage | {r['fieldCoverage']['ratio']:.0%} |",
         f"| Text layers (mixed style) | {r['text']['textNodes']} ({r['text']['mixedStyleNodes']}) |",
         f"| Fonts | {len(r['text']['fonts'])} |",
-        f"| Variables / bound layers | {r['variables']['variables']} / "
-        f"{r['variables']['nodesWithBoundVariables']} |",
-        f"| Instances (missing main) | {r['components']['instances']} "
-        f"({r['components']['missingMainComponent']}) |",
+        f"| Variables / bound layers | {r['variables']['variables']} / {r['variables']['nodesWithBoundVariables']} |",
+        f"| Instances (missing main) | {r['components']['instances']} ({r['components']['missingMainComponent']}) |",
         f"| Layers with interactions | {r['interactions']['nodesWithReactions']} |",
         f"| Hover variant swaps | {r['interactions']['hoverVariantSwaps']} |",
         f"| Motion panel layers | {r['motion']['nodesWithMotionData']} |",

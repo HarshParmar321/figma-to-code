@@ -8,7 +8,7 @@ import { collectVariables } from './variables.ts';
 const PLUGIN_VERSION = '0.1.0';
 const FRAME_TYPES = new Set(['FRAME', 'COMPONENT', 'INSTANCE']);
 
-figma.showUI(__html__, { width: 420, height: 600, themeColors: true });
+figma.showUI(__html__, { width: 420, height: 640, themeColors: true });
 
 function post(msg: MainToUi) {
   figma.ui.postMessage(msg);
@@ -104,6 +104,8 @@ figma.ui.onmessage = async (msg: UiToMain) => {
     } catch (e) {
       post({ type: 'error', message: `Export failed: ${String(e)}` });
     }
+  } else if (msg.type === 'open-url') {
+    if (/^https?:\/\//.test(msg.url)) figma.openExternal(msg.url);
   } else if (msg.type === 'select-node') {
     const node = await figma.getNodeByIdAsync(msg.nodeId);
     if (node && 'visible' in node) {

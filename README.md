@@ -1,17 +1,19 @@
 # Figma to Code
 
-A Figma plugin plus a cloud Engine that turns a Figma design into verified, responsive HTML/CSS (v1) and later a WordPress theme (v1.5). See the SRS for the full specification.
+A Figma plugin plus an Engine that turns a Figma design into verified, responsive HTML/CSS (v1) and later a WordPress theme (v1.5). See the SRS for the full specification.
 
-**Current stage: Spike 1, plugin extraction.** The plugin reads selected frames into a bundle; the Engine stores it and produces an extraction report showing how complete and convertible the design is.
+**Current stage: v0.2, end-to-end pipeline.** In the plugin, click **Convert to code**: the design is read, uploaded, converted to HTML/CSS, rendered in a real browser, compared against the Figma frame and scored. You get a live preview, a fidelity report and a downloadable zip.
 
 ## Repository layout
 
 ```
-schemas/        bundle.schema.json: the contract between plugin and Engine (source of truth)
-plugin/         Figma plugin (TypeScript): serializer, asset export, UI
-engine/         Engine (Python, FastAPI): bundle intake, storage, extraction report
-fixtures/       sample bundle + generator script
-docs/           spike guides and notes
+schemas/          bundle.schema.json: the contract between plugin and Engine (source of truth)
+plugin/           Figma plugin (TypeScript): serializer, asset export, one-click Convert UI
+engine/           Engine (Python, FastAPI)
+  app/pipeline/   ir.py → layout.py → generate.py → fidelity.py, orchestrated by convert.py
+  app/spike_report.py   design check (Auto Layout coverage, sections, findings)
+fixtures/         sample bundle + generator script
+docs/             pipeline notes and spike results
 ```
 
 ## Requirements
@@ -25,10 +27,20 @@ docs/           spike guides and notes
 ```bash
 cd engine
 uv sync
+uv run playwright install chromium     # once (~150 MB): needed for the design comparison
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
-Check it: `curl localhost:8000/health`. Bundles are stored in `engine/data/` (override with `ENGINE_DATA_DIR`).
+Check it: open http://localhost:8000/health. Everything is stored in `engine/data/bundles/<bundle-id>/`:
+
+| Path | What |
+| --- | --- |
+| `output/` | Generated site: `index.html`, `css/styles.css`, `images/`, `fonts/` |
+| `code.zip` | The same site, zipped for download |
+| `fidelity/report.html` | Score, breakdown, side-by-side and difference images, issues |
+| `conversion.json` | Summary of the last conversion |
+
+Without Chromium the code is still generated; the score is skipped and the plugin tells you how to install it.
 
 ## Build and load the plugin
 
@@ -38,20 +50,28 @@ npm install
 npm run build      # or: npm run watch
 ```
 
-In the Figma desktop app: **Plugins → Development → Import plugin from manifest…** and choose `plugin/manifest.json`. Then run **Plugins → Development → Figma to Code (dev)**.
+In the Figma desktop app, open a design file, press **Cmd + /**, run **Import plugin from manifest** and choose `plugin/manifest.json`. Then run **Figma to Code (dev)**.
 
-1. Select a desktop frame and its mobile frame on the canvas.
-2. Check the role next to each frame (suggested from width).
-3. Click **Export**, then **Upload to Engine**. The extraction report appears in the plugin.
-4. **Download JSON** saves the bundle for offline analysis.
+1. Select a desktop frame (and its mobile frame if you have one). Check the role next to each frame.
+2. Click **Convert to code**. Steps: Read design → Upload → Generate and check.
+3. See the score, then **Open preview**, **Report** or **Download code**.
 
-The plugin can only reach `http://localhost:8000` during development (see `networkAccess` in the manifest).
+The plugin can only reach `http://localhost:8000` during development (see `networkAccess` in the manifest). **Settings and advanced** in the plugin has export-only, upload-only and JSON download.
 
-## Report from a saved bundle
+## Settings (environment variables)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ENGINE_DATA_DIR` | `engine/data` | Where bundles and outputs are stored |
+| `ENGINE_FONT_DIR` | `engine/data/fonts` | Self-hosted fonts: `<family>/<family>-latin-<weight>-<normal\|italic>.woff2` (Fontsource naming). Missing fonts load from Google Fonts. |
+| `ENGINE_CHROMIUM_PATH` | Playwright's Chromium | Use a specific Chrome/Chromium binary for the comparison |
+| `ENGINE_PUBLIC_URL` | `http://localhost:8000` | Base URL used in links returned to the plugin |
+
+## Command-line tools
 
 ```bash
 cd engine
-uv run python -m app.spike_report ../fixtures/sample-bundle.json --md
+uv run python -m app.spike_report ../fixtures/sample-bundle.json --md     # design check for a saved bundle
 ```
 
 ## Tests
@@ -61,7 +81,9 @@ cd engine && uv run pytest && uv run ruff check .
 cd plugin && npm run typecheck && npm test && npm run build
 ```
 
-## API (v0.1)
+The full browser test runs only when Chromium is installed; otherwise it is skipped.
+
+## API (v0.2)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -69,7 +91,12 @@ cd plugin && npm run typecheck && npm test && npm run build
 | POST | `/v1/bundles` | Upload bundle JSON; validated against the schema; returns `bundleId` |
 | PUT | `/v1/bundles/{id}/assets/{assetId}` | Upload one declared asset (raw bytes) |
 | GET | `/v1/bundles/{id}` | Bundle metadata and missing assets |
-| GET | `/v1/bundles/{id}/report` | Extraction report (JSON) |
+| GET | `/v1/bundles/{id}/report` | Design check (JSON) |
+| POST | `/v1/bundles/{id}/convert` | Generate HTML/CSS and score it (`?verify=false` skips the browser check) |
+| GET | `/v1/bundles/{id}/conversion` | Last conversion result |
+| GET | `/v1/bundles/{id}/output/{path}` | Live preview of the generated site |
+| GET | `/v1/bundles/{id}/fidelity/{path}` | Fidelity report and images |
+| GET | `/v1/bundles/{id}/code.zip` | Download the generated code |
 
 ## Changing the bundle contract
 

@@ -9,6 +9,9 @@ dependencies = [
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "jsonschema>=4.23",
+    "pillow>=10.4",
+    "numpy>=1.26",
+    "playwright>=1.48",
 ]
 
 [dependency-groups]
@@ -29,8 +32,12 @@ packages = ["app"]
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# The fidelity report is an embedded HTML/CSS template.
+"app/pipeline/fidelity.py" = ["E501"]
