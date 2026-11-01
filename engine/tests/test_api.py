@@ -7,6 +7,11 @@ def upload_all(client, bundle_id, bundle):
         assert res.status_code == 200, res.text
 
 
+def test_root_points_to_docs(client):
+    body = client.get("/").json()
+    assert body["docs"] == "/docs"
+
+
 def test_health(client):
     assert client.get("/health").json()["status"] == "ok"
 

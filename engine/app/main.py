@@ -27,6 +27,16 @@ class BundleCreated(BaseModel):
     assetIds: list[str]
 
 
+@app.get("/")
+def root() -> dict:
+    return {
+        "service": "Figma-to-Code Engine",
+        "version": __version__,
+        "health": "/health",
+        "docs": "/docs",
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "version": __version__}
