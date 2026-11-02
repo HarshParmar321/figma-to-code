@@ -18,6 +18,7 @@ from . import __version__
 from .config import settings
 from .pipeline import fonts as fontfiles
 from .pipeline.convert import convert
+from .pipeline.export import clean_site
 from .schema import validate_bundle
 from .spike_report import build_report
 from .storage import BundleStore, DiskFull, NotFound, is_disk_full
@@ -286,19 +287,19 @@ def get_conversion(bundle_id: str) -> dict:
 
 @app.get("/v1/bundles/{bundle_id}/code.zip")
 def download_code(bundle_id: str) -> Response:
-    """The generated site as a zip, built on request (nothing extra is stored on disk)."""
+    """The generated site as a zip, built on request: clean code (no data-figma-id, corrections folded
+    into the real classes). The live preview keeps the instrumented version for the design check."""
     try:
         out = store.bundle_dir(bundle_id) / "output"
     except NotFound as e:
         raise HTTPException(404, "Bundle not found") from e
     if not (out / "index.html").exists():
         raise HTTPException(404, "Not converted yet")
+    meta = store.load(bundle_id)["source"]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for f in sorted(out.rglob("*")):
-            if f.is_file():
-                z.write(f, f.relative_to(out).as_posix())
-    meta = store.load(bundle_id)["source"]
+        for rel, data in clean_site(out, meta.get("fileName", "Site")).items():
+            z.writestr(rel, data)
     name = "".join(c if c.isalnum() or c in "-_" else "-" for c in meta.get("fileName", "design")).strip("-")
     headers = {"Content-Disposition": f'attachment; filename="{name or "design"}-code.zip"'}
     return Response(buf.getvalue(), media_type="application/zip", headers=headers)

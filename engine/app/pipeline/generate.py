@@ -13,6 +13,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import breakpoints as bp
 from . import fonts as fontfiles
 from .ir import El, Page
 from .styles import background, border, border_widths, effects, line_height_px, px, radius, text_style
@@ -32,6 +33,9 @@ ICON_MAX = 64
 WEBP_QUALITY = 82
 MAX_IMAGE_EDGE = 2560
 PAINT_KINDS = {"text", "image", "svg", "raster", "shape", "box"}
+FIELD_ROLES = ("input", "textarea", "submit")
+AXIS_ALIGN = {"MIN": "flex-start", "CENTER": "center", "MAX": "flex-end", "SPACE_BETWEEN": "space-between",
+              "BASELINE": "baseline"}  # fmt: skip
 CTA_WORDS = re.compile(r"\b(contact|help|touch|book|call|quote|talk|hire|start|enquire|inquire|message|demo)\b")
 # Where an element sits (set by its parent), as opposed to how it looks.
 PLACEMENT_KEYS = {"margin-top", "margin-left", "margin-inline", "align-self", "z-index", "position", "top", "left"}
@@ -69,6 +73,30 @@ def _texts(e: El) -> list[El]:
 def _text(chars: str) -> str:
     """Escaped text; Figma line breaks become <br> (no white-space: pre needed)."""
     return "<br>".join(html.escape(part) for part in chars.split("\n"))
+
+
+MEDIA_MARK = "\n/*@@media@@*/\n"
+MOBILE_Q = "@media (max-width: 767px)"
+TABLET_Q = "@media (max-width: 1023px)"
+
+
+def _query_width(q: str) -> float:
+    m = re.search(r"max-width:\s*([\d.]+)px", q)
+    return float(m.group(1)) if m else 1e9
+
+
+FLUID_TEXT_MIN = 32.0  # font sizes from here up scale with the viewport
+FLUID_SPACE_MIN = 64.0  # paddings, gaps and margins from here up scale with the viewport
+PHONE = 390.0
+
+
+def fluid_value(design: float, phone: float, design_width: float) -> str:
+    """clamp(phone, linear, design): exactly `design` at the design width, `phone` at 390px."""
+    if design_width <= PHONE + 1 or phone >= design:
+        return px(design)
+    slope = (design - phone) / (design_width - PHONE)
+    base = phone - slope * PHONE
+    return f"clamp({px(round(phone))}, {base + 0.05:.2f}px + {slope * 100:.4f}vw, {px(design)})"
 
 
 def _sort_key(v: str) -> float:
@@ -118,12 +146,18 @@ class Generator:
         self.body_style: dict[str, str] | None = None  # base text style, written once on <body>
         self.container_width = 0.0
         self.design_width = 0.0
+        self.media_css = ""
+        self._in_stage = 0  # > 0 while rendering inside an overlapping composition
+        self.frame_css: dict[int, dict[str, dict[str, str]]] = {}  # element id -> {query: decls} from frames
+        self.frame_checks: dict[str, list] = {}  # page file -> [(role, frame Page, expectations)]
+        self.root_media: dict[str, dict[str, str]] = {}  # query -> :root declarations (gutter per frame)
         self.expect: list[dict] = []
         self.assumptions: list[str] = []
         self.warnings: list[str] = list(page.warnings) if page else []
         self.section_slug = "page"
         self._anc: list[str] = []  # figma ids of measurable ancestors while rendering
-        self._ctx: list[str] = ["absolute"]  # how the current parent lays out its children
+        self._ctx: list[str] = ["page"]  # how the current parent lays out its children
+        self._auto: list[bool] = [False]  # whether the current parent is a Figma Auto Layout frame
         self._parent_span: list[tuple[float, float] | None] = []  # parent content box (x0, x1) per level
         self.asset_hashes: dict[str, str] = {}
         self._by_hash: dict[str, str] = {}
@@ -454,7 +488,9 @@ class Generator:
         if e.node is not None and e.kind not in ("wrapper", "container", "section"):
             attrs.append(f'data-figma-id="{html.escape(e.node["id"])}"')
 
-        if e.kind == "text":
+        if e.role in FIELD_ROLES:
+            tag, role, inner = self.field(e, main, css, attrs)
+        elif e.kind == "text":
             tag = e.tag or "p"
             role = {"h1": "title", "h2": "title", "h3": "heading", "span": "label", "a": "link"}.get(tag, "text")
             if tag == "a":
@@ -538,8 +574,10 @@ class Generator:
                 role = "container"
                 if not e.layout.get("page_container"):
                     left, right = e.x - 0, self.page.width - e.right
-                    if abs(left - right) <= 4:
-                        main.update({"width": f"min(100% - 2 * var(--gutter), {px(e.w)})", "margin-inline": "auto"})
+                    if e.w >= self.page.width - 2:
+                        pass  # spans the whole design: the section (or its stage) already sizes it
+                    elif abs(left - right) <= 4:
+                        main.update({"width": f"min(100%, {px(e.w)})", "margin-inline": "auto"})
                     else:
                         main.update({"width": px(e.w), "max-width": "100%", "margin-left": px(left)})
             elif e.kind == "box":
@@ -549,7 +587,9 @@ class Generator:
                 css.update(self.deco_rules(e))
                 if e.deco:
                     main.update({"position": "relative", "isolation": "isolate"})
-                if e.role == "button":
+                if e.role == "button" and e.tag == "button":
+                    attrs.append('type="submit"')
+                elif e.role == "button":
                     attrs.append(f'href="{html.escape(self.link_for(e))}"')
                     main["text-decoration"] = "none"
                 self.expect_box(e)
@@ -577,6 +617,7 @@ class Generator:
                 main["min-height"] = px(e.h)
                 box_css = stage_css
                 self._fit_sections = True
+                self._in_stage += 1
             if e.kind == "section" and len(children) == 1 and children[0].kind == "container":
                 # Band section: one container carries the content; the section only pads it.
                 pad = (children[0].y - e.y, 0, e.bottom - children[0].bottom, 0)
@@ -589,7 +630,24 @@ class Generator:
                 pad = (0, 0, 0, 0)
                 flow, per_child = {}, [{}]  # button_css centres the label
                 child_ctx = "row"
-            else:  # boxes, wrappers and frame sections (Auto Layout or not) lay out their children directly
+            elif e.layout.get("auto") and e.node is not None:
+                # Figma Auto Layout: its own gap, padding, alignment and fill/hug/fixed sizing are the
+                # designer's intent, so they are written as they are instead of being inferred.
+                n = e.node
+                pad = tuple(
+                    float(n.get(k) or 0) for k in ("paddingTop", "paddingRight", "paddingBottom", "paddingLeft")
+                )
+                if any(pad):
+                    box_css["padding"] = self.padding_value(e, pad)
+                flow, per_child = self.auto_flow_css(e, children)
+                vertical_fixed = n.get("layoutSizingVertical") == "FIXED" or (
+                    n.get("layoutMode") == "VERTICAL" and n.get("primaryAxisSizingMode") == "FIXED")  # fmt: skip
+                if vertical_fixed and e.kind != "section" and children:
+                    box_css["min-height"] = px(e.h)
+                if e.kind == "section":
+                    main["min-height"] = px(e.h)
+                child_ctx = flow.pop("__ctx__", "column")
+            else:  # boxes, wrappers and frame sections without Auto Layout: inferred from positions
                 pad = self.padding(e, children)
                 if any(pad):
                     box_css["padding"] = self.padding_value(e, pad)
@@ -617,6 +675,7 @@ class Generator:
                 if any(id(x) in self._bg for x in e.layers):
                     main["isolation"] = "isolate"  # background layers (z-index -1) stay inside this box
                 self._ctx.append("layer")
+                self._auto.append(False)
                 for layer in sorted(e.layers, key=lambda x: x.z):
                     if e.kind == "section" and not stage:
                         lp = self.anchored_css(layer, e)
@@ -637,7 +696,9 @@ class Generator:
                     else:
                         stage_parts.append(self.render(layer, lp, cdepth))
                 self._ctx.pop()
+                self._auto.pop()
             self._ctx.append(child_ctx)
+            self._auto.append(bool(e.layout.get("auto")) and e.node is not None)
             if e.role == "button":
                 self._component.append("btn")
             if e.kind == "section" and len(children) == 1 and children[0].kind == "container":
@@ -648,6 +709,7 @@ class Generator:
                 (stage_parts if stage_css is not None else parts).append(self.render(c, cd, cdepth))
             self._parent_span.pop()
             self._ctx.pop()
+            self._auto.pop()
             if e.role == "button":
                 self._component.pop()
             if measurable:
@@ -664,14 +726,20 @@ class Generator:
                     f"{items}\n{ind}  </ul>\n{ind}</nav>"
                 )
             if stage_css is not None:
-                stage_cls = self.class_for("stage", {"": stage_css})
+                self._in_stage -= 1
+                stage_css = dict(stage_css)
+                stage_css_m = {"min-height": "0", "display": "flex", "flex-direction": "column", "gap": "24px",
+                               "padding-block": "32px"}  # fmt: skip
+                stage_cls = self.class_for("stage", {"": stage_css, MOBILE_Q: stage_css_m})
                 sind = "  " * (depth + 1)
                 stage_html = f'{sind}<div class="{stage_cls} l-stage">\n' + "\n".join(stage_parts) + f"\n{sind}</div>"
                 parts = parts + [stage_html]
                 attrs.append('data-fit=""')
             inner = "\n" + "\n".join(parts) + "\n" + ind
             if e.kind == "container" and e.layout.get("page_container"):
-                cls_extra = self.class_for("content", css) if any(main.values()) else ""
+                for q, decls in self.frame_css.get(id(e), {}).items():
+                    css[q] = dict(decls)
+                cls_extra = self.class_for("content", css) if any(main.values()) or len(css) > 1 else ""
                 a = (" " + " ".join(attrs)) if attrs else ""
                 klass = "container" + (f" {cls_extra}" if cls_extra else "")
                 if e.layout.get("mode") == "row" and main.get("display") != "grid":
@@ -679,6 +747,7 @@ class Generator:
                 return f'{ind}<div class="{klass}"{a}>{inner}</div>'
 
         bleed_done = placement.pop("__bleed_done__", None) if "__bleed_done__" in placement else None
+        mobile = dict(placement.pop("__mobile__", None) or {})
         main.update(placement)
         if id(e) in self._bg:
             main["z-index"] = "-1"
@@ -693,6 +762,14 @@ class Generator:
             main.update(self.mask_css(e))
         if e.kind in ("box", "shape"):
             self._extend_to_edge(e, main)
+        mobile.update(self.composition_mobile(e, main))
+        mobile.update(self.fluid(e, main))
+        mobile.update(self.frame_css.get(id(e), {}).get(MOBILE_Q, {}))
+        if mobile:
+            css[MOBILE_Q] = mobile
+        tablet = self.frame_css.get(id(e), {}).get(TABLET_Q)
+        if tablet:
+            css[TABLET_Q] = dict(tablet)
         if e.role == "button" and e.kind == "box":
             place = {k: main.pop(k) for k in list(main) if k in PLACEMENT_KEYS}
             if e.deco and "position" not in main:
@@ -707,9 +784,76 @@ class Generator:
             utility += f" l-grid-{main['grid-template-columns'][7:].split(',')[0]}"
         extra = ' class="' + cls + utility + '"'
         a = (" " + " ".join(attrs)) if attrs else ""
-        if tag == "img":
-            return f"{ind}<img{extra}{a}>"
+        if tag in ("img", "input"):
+            return f"{ind}<{tag}{extra}{a}>"
         return f"{ind}<{tag}{extra}{a}>{inner}</{tag}>"
+
+    # ------------------------------------------------------------------ responsive (no mobile frame)
+    def composition_mobile(self, e: El, main: dict[str, str]) -> dict[str, str]:
+        """Inside an overlapping composition (or any absolutely positioned group), phones get a plain
+        vertical flow: pieces stop being absolutely positioned and large paddings shrink."""
+        d: dict[str, str] = {}
+        if e.kind == "section" and e.layout.get("stage"):
+            return {"min-height": "0"}
+        in_abs = self._ctx[-1] in ("absolute", "layer") and (self._in_stage or self._ctx[-1] == "absolute")
+        if in_abs and main.get("position") == "absolute" and e.kind != "section":
+            if e.kind == "shape" and not e.children:
+                return {"display": "none"}  # decoration: panels, glows, dots
+            if e.kind in ("svg", "raster") and not self._icon(e):
+                return {"display": "none"}  # patterns and illustrations behind the content
+            d.update({"position": "relative", "left": "auto", "top": "auto", "right": "auto", "max-width": "100%"})
+            if e.kind in ("image", "raster", "svg") and not self._icon(e):
+                d.update({"width": "100%", "height": "auto", "aspect-ratio": f"{round(e.w)} / {round(e.h)}"})
+        if e.layout.get("mode") == "absolute" and e.kind in ("box", "wrapper") and (self._in_stage or in_abs):
+            d.update({"height": "auto", "width": "auto", "display": "flex", "flex-direction": "column", "gap": "16px"})
+        ml = main.get("margin-left", "")
+        if self._in_stage and ml.endswith("px") and abs(float(ml[:-2])) > 24:
+            d["margin-left"] = "0"
+        pad = main.get("padding", "")
+        if pad and (self._in_stage or in_abs) and any(
+            float(v[:-2]) > 48 for v in pad.split() if v.endswith("px")
+        ):  # fmt: skip
+            d["padding"] = " ".join(
+                ("24px" if float(v[:-2]) > 24 else v) if v.endswith("px") else v for v in pad.split()
+            )  # fmt: skip
+        return d
+
+    def _icon(self, e: El) -> bool:
+        return e.kind == "svg" and max(e.w, e.h) <= ICON_MAX
+
+    def fluid(self, e: El, main: dict[str, str]) -> dict[str, str]:
+        """Large type and spacing shrink smoothly between the design width and a phone, reaching their
+        exact Figma value at the design width (so the pixel check is unchanged)."""
+        W = self.page.width
+        if W <= 600:
+            return {}
+        out: dict[str, str] = {}
+        fs = main.get("font-size", "")
+        if e.kind == "text" and fs.endswith("px") and float(fs[:-2]) >= FLUID_TEXT_MIN:
+            size = float(fs[:-2])
+            phone = max(20.0, size * 0.6)
+            if main.get("white-space") == "nowrap" and e.w > 0:
+                # A one-line heading must fit a phone (358px of text) at its phone size.
+                phone = max(18.0, min(phone, size * (PHONE - 2 * GUTTER) / e.w * 0.98))
+            main["font-size"] = fluid_value(size, phone, W)
+            lh = main.get("line-height", "")
+            if lh.endswith("px"):
+                # Same curve as the font size: exact px at the design width, proportional below it.
+                main["line-height"] = fluid_value(float(lh[:-2]), float(lh[:-2]) * phone / size, W)
+        for key in ("padding-block", "gap", "margin-top"):
+            v = main.get(key, "")
+            parts = v.split()
+            if not parts or not all(p.endswith("px") for p in parts):
+                continue
+            vals = [float(p[:-2]) for p in parts]
+            if max(vals) < FLUID_SPACE_MIN or (key == "margin-top" and self._ctx[-1] not in ("column",)):
+                continue
+            main[key] = " ".join(fluid_value(x, max(16.0, x * 0.4), W) if x >= FLUID_SPACE_MIN else px(x) for x in vals)
+        if e.kind == "text" and main.get("white-space") == "nowrap":
+            chars = (e.node or {}).get("characters", "")
+            if len(chars) > 24 or (fs.endswith("px") is False and len(chars.split()) > 1) or len(chars.split()) > 3:
+                out["white-space"] = "normal"  # may wrap on a phone
+        return out
 
     # ------------------------------------------------------------------ semantics
     def semantics(self, page: Page) -> None:
@@ -766,6 +910,8 @@ class Generator:
 
         for sec in page.sections[:2]:
             visit(sec, None, sec)
+        for sec in page.sections:
+            self.detect_forms(sec)
         self.heading_order(page)
 
     @staticmethod
@@ -824,7 +970,164 @@ class Generator:
             return {}
         return dict(counts.most_common(1)[0][0])
 
+    # ------------------------------------------------------------------ forms
+    @staticmethod
+    def _field_like(e: El) -> bool:
+        """A drawn input: a filled or outlined box 32–72px tall (taller: a textarea), at most one short
+        text inside (the placeholder)."""
+        if e.kind not in ("shape", "box") or e.w < 120 or not (32 <= e.h <= 220):
+            return False
+        n = e.node or {}
+        drawn = any(f.get("visible", True) for f in (n.get("fills") or []) + (n.get("strokes") or []))
+        texts = [t for t in e.walk() if t.kind == "text"]
+        others = [x for x in e.walk() if x is not e and x.kind not in ("text", "svg", "wrapper")]
+        short = all(len(t.node.get("characters", "").split()) <= 6 for t in texts)
+        return drawn and len(texts) <= 1 and not others and short and (n.get("type") != "ELLIPSE")
+
+    def detect_forms(self, sec: El) -> None:
+        """Two or more equal drawn inputs stacked in one column, followed by a button: a <form>."""
+        for parent in list(sec.walk()):
+            if parent.tag == "form":
+                continue
+            kids = [c for c in parent.children]
+            groups: dict[tuple, list[El]] = {}
+            for c in kids:
+                if self._field_like(c) and c.role not in ("button", *FIELD_ROLES):
+                    groups.setdefault((round(c.x / 4), round(c.w / 4)), []).append(c)
+            fields = max(groups.values(), key=len, default=[])  # same left edge and width: one column
+            if len(fields) < 2:
+                continue
+            last = max(fields, key=lambda f: f.y)
+            submit = next(
+                (c for c in kids if c.y >= last.bottom - 1 and c not in fields
+                 and (c.role == "button" or (c.kind in ("shape", "box") and 24 <= c.h <= 72 and c.w >= 60))),
+                None,
+            )  # fmt: skip
+            style = lambda f: (json.dumps((f.node or {}).get("fills")), json.dumps((f.node or {}).get("strokes")))  # noqa: E731
+            if submit is None:
+                # The last box styled differently from the others (e.g. an outlined one) is the button.
+                odd = [f for f in fields if style(f) != style(fields[0])]
+                if len(odd) == 1 and odd[0] is last and len(fields) >= 3:
+                    submit = last
+                    fields = [f for f in fields if f is not last]
+            if submit is None:
+                continue
+            for i, f in enumerate(sorted(fields, key=lambda f: f.y)):
+                f.role = "textarea" if f.h >= 90 else "input"
+                f.html_id = None
+                f.layout["field_index"] = i + 1
+            if submit.role == "button":
+                submit.tag = "button"
+            else:
+                submit.role = "submit"
+            if parent.kind in ("box", "wrapper") and parent.tag is None:
+                parent.tag = "form"
+                continue
+            # Fields sit directly in a section's content column: group them (and the button) in a
+            # <form> of their own, if they are consecutive.
+            members = sorted(set(fields) | {submit}, key=lambda c: parent.children.index(c))
+            idx = [parent.children.index(c) for c in members]
+            if idx != list(range(idx[0], idx[0] + len(idx))):
+                continue
+            x0, y0 = min(c.x for c in members), min(c.y for c in members)
+            x1, y1 = max(c.right for c in members), max(c.bottom for c in members)
+            form = El(f"form-{members[0].id}", "form", "wrapper", x0, y0, x1 - x0, y1 - y0,
+                      z=min(c.z for c in members), children=members, layout={"mode": "column"}, tag="form")  # fmt: skip
+            parent.children[idx[0] : idx[-1] + 1] = [form]
+
+    FIELD_TYPES = (("email", "email"), ("mail", "email"), ("phone", "tel"), ("tel", "tel"), ("number", "tel"),
+                   ("website", "url"), ("url", "url"), ("search", "search"), ("date", "date"))  # fmt: skip
+
+    def field(self, e: El, main: dict, css: dict, attrs: list[str]) -> tuple[str, str, str]:
+        """An input / textarea / submit button drawn in Figma, as a real form control."""
+        texts = [t for t in e.walk() if t.kind == "text"]
+        label = texts[0].node.get("characters", "").strip() if texts else ""
+        n = e.node or {}
+        main.update(self.size_css(e))
+        main["height"] = px(e.h)
+        main.update(self.visual(e))
+        main.update({"font": "inherit", "color": "inherit"})
+        if not any(f.get("visible", True) for f in n.get("strokes") or []):
+            main["border"] = "0"
+        if not any(f.get("visible", True) for f in n.get("fills") or []):
+            main["background"] = "transparent"
+        self.expect_box(e)
+        if texts:
+            t = texts[0]
+            st = text_style(max(t.node.get("textSegments") or [{}], key=lambda s: len(s.get("characters", ""))), t.node)
+            main.update({k: st[k] for k in ("font-family", "font-size", "font-weight") if k in st})
+            main["padding-inline"] = px(max(0.0, t.x - e.x))
+        elif e.role != "submit":
+            main["padding-inline"] = "16px"
+        if e.role == "submit":
+            main["cursor"] = "pointer"
+            attrs.append('type="submit"')
+            if not label:
+                attrs.append('aria-label="Send"')
+            if texts and "color" in st:
+                main["color"] = st["color"]
+            return "button", "submit", html.escape(label)
+        idx = e.layout.get("field_index", 1)
+        kind = next((typ for word, typ in self.FIELD_TYPES if word in label.lower()), "text")
+        name = slug(label, f"field-{idx}") if label else f"field-{idx}"
+        attrs.append(f'name="{html.escape(name)}"')
+        if label:
+            attrs.append(f'placeholder="{html.escape(label)}"')
+        attrs.append(f'aria-label="{html.escape(label or f"Field {idx}")}"')
+        if texts and "color" in st:
+            css["::placeholder"] = {"color": st["color"], "opacity": "1"}
+        if e.role == "textarea":
+            main.update({"resize": "vertical", "padding-block": px(max(8.0, texts[0].y - e.y)) if texts else "12px"})
+            return "textarea", "field", ""
+        attrs.append(f'type="{kind}"')
+        return "input", "field", ""
+
     # ------------------------------------------------------------------ fluid sizing
+    def auto_flow_css(self, parent: El, children: list[El]) -> tuple[dict, list[dict]]:
+        """CSS for a Figma Auto Layout frame, read from its settings (not from positions)."""
+        n = parent.node or {}
+        row = n.get("layoutMode") == "HORIZONTAL"
+        d: dict = {"display": "flex"} if row else {"display": "flex", "flex-direction": "column"}
+        primary = n.get("primaryAxisAlignItems") or "MIN"
+        counter = n.get("counterAxisAlignItems") or "MIN"
+        if primary != "MIN":
+            d["justify-content"] = AXIS_ALIGN.get(primary, "flex-start")
+        d["align-items"] = AXIS_ALIGN.get(counter, "flex-start")
+        gap = float(n.get("itemSpacing") or 0)
+        wrap = n.get("layoutWrap") == "WRAP"
+        if wrap:
+            d["flex-wrap"] = "wrap"
+            cross_gap = float(n.get("counterAxisSpacing") or 0)
+            if gap and primary != "SPACE_BETWEEN":
+                d["column-gap" if row else "row-gap"] = px(gap)
+            if cross_gap:
+                d["row-gap" if row else "column-gap"] = px(cross_gap)
+        elif gap and primary != "SPACE_BETWEEN":
+            d["gap"] = px(gap)
+        per_child: list[dict] = []
+        for c in children:
+            cn = c.node or {}
+            cd: dict = {}
+            if cn.get("layoutPositioning") == "ABSOLUTE":
+                cd = {"position": "absolute", "left": px(c.x - parent.x), "top": px(c.y - parent.y)}
+                d.setdefault("position", "relative")
+            else:
+                main_fill = cn.get("layoutSizingHorizontal" if row else "layoutSizingVertical") == "FILL"
+                cross_fill = cn.get("layoutSizingVertical" if row else "layoutSizingHorizontal") == "FILL"
+                if main_fill or cn.get("layoutGrow") == 1:
+                    cd.update({"flex": "1 1 0", "min-width": "0"} if row else {"flex": "1 1 auto"})
+                if cross_fill or cn.get("layoutAlign") == "STRETCH":
+                    cd["align-self"] = "stretch"
+            per_child.append(cd)
+        d["__ctx__"] = "row" if row else "column"
+        return d, per_child
+
+    def _auto_sizing(self, e: El) -> str | None:
+        """FILL / HUG / FIXED width of e when its parent is an Auto Layout frame, else None."""
+        if not self._auto[-1] or e.node is None:
+            return None
+        return e.node.get("layoutSizingHorizontal")
+
     def size_css(self, e: El, icon: bool = False) -> dict[str, str]:
         """Width/height for an element, written the way a front-end developer would.
 
@@ -832,6 +1135,12 @@ class Generator:
         only icons, decorations and absolutely positioned pieces keep fixed pixel sizes.
         """
         ctx = self._ctx[-1]
+        sizing = self._auto_sizing(e)
+        if sizing in ("HUG", "FILL") and e.kind in ("box", "wrapper") and ctx not in ("absolute", "layer"):
+            return {}  # Auto Layout decides: hug its content, or fill (set by the parent's flex rules)
+        if sizing == "FILL" and e.kind in ("image", "shape") and ctx == "column":
+            return {"width": "100%"} if e.kind == "shape" else {
+                "width": "100%", "height": "auto", "aspect-ratio": f"{round(e.w)} / {round(e.h)}"}  # fmt: skip
         bx, by, bw, bh = self._draw_box(e)
         fixed = ctx in ("absolute", "layer") or e.bleed or icon
         if e.kind in ("image", "svg", "raster"):
@@ -942,7 +1251,12 @@ class Generator:
         x, y, w, _h = self._draw_box(layer)
         d = {"position": "absolute", "top": px(y - sec.y), "__bleed_done__": "1"}
         left_edge, right_edge = layer.x <= 1, layer.right >= W - 1
-        if left_edge and right_edge and not layer.bleed:
+        covers = left_edge and right_edge and abs(layer.y - sec.y) <= 2 and abs(layer.bottom - sec.bottom) <= 2
+        if covers and not layer.bleed:
+            # Exactly the section's box: follows the section's height at every screen size.
+            d.update({"inset": "0", "width": "100%", "height": "100%"})
+            d.pop("top")
+        elif left_edge and right_edge and not layer.bleed:
             d.update({"left": "0", "width": "100%"})
         elif left_edge and not layer.bleed:
             d.update({"left": "0", "width": self._center(layer.right - W / 2)})
@@ -952,7 +1266,23 @@ class Generator:
             d["left"] = self._center(x - W / 2)
         if "width" in d and layer.kind in ("svg", "raster", "image"):
             d["object-fit"] = "cover"
+        if not covers:
+            d["__mobile__"] = self.layer_mobile(layer)
         return d
+
+    def layer_mobile(self, layer: El) -> dict[str, str]:
+        """Phones (no mobile frame): big background layers cover the whole section, small decorations
+        are hidden, small photos join the flow at full width."""
+        W = self.page.width
+        round_shape = layer.kind == "shape" and (layer.node or {}).get("type") in ("ELLIPSE", "STAR", "POLYGON")
+        if layer.w >= W * 0.5 and not round_shape:
+            fit = {"object-fit": "cover"} if layer.kind in ("svg", "raster", "image") else {}
+            return {"inset": "0", "left": "0", "right": "auto", "top": "0", "width": "100%", "height": "100%", **fit}
+        if layer.kind == "image":
+            return {"position": "relative", "inset": "auto", "left": "auto", "right": "auto", "top": "auto",
+                    "width": "100%", "max-width": px(layer.w), "height": "auto",
+                    "aspect-ratio": f"{round(layer.w)} / {round(layer.h)}", "margin-inline": "auto"}  # fmt: skip
+        return {"display": "none"}
 
     GENERIC_NAME = re.compile(
         r"^(rectangle|image|img|photo|picture|frame|group|mask group|ellipse|vector|place your|bg|background)"
@@ -1129,7 +1459,10 @@ class Generator:
         if d.get("line-height") == "normal" and lines >= 1:
             # Figma "Auto" line height: write the measured value, so a fallback font cannot change heights.
             d["line-height"] = px(e.h / lines)
-        if resize == "WIDTH_AND_HEIGHT":
+        sizing = self._auto_sizing(e)
+        if sizing == "FILL":
+            pass  # fills its Auto Layout parent: no width of its own
+        elif resize == "WIDTH_AND_HEIGHT":
             # Hugging text: its width is its content. Short labels never wrap.
             if "\n" not in chars and len(chars) <= 60:
                 d["white-space"] = "nowrap"
@@ -1318,13 +1651,22 @@ class Generator:
         for sel, decls in head or []:
             if decls:
                 blocks.append(f"{sel} {{\n" + "\n".join(f"  {k}: {v};" for k, v in decls.items()) + "\n}")
+        media: dict[str, list[str]] = {}
         for cls, parts in self.rules.items():
             for suffix, decls in parts.items():
                 if not decls:
                     continue
+                if suffix.startswith("@media"):
+                    body = " ".join(f"{k}: {v};" for k, v in decls.items())
+                    media.setdefault(suffix, []).append(f"  .{cls} {{ {body} }}")
+                    continue
                 body = "\n".join(f"  {k}: {v};" for k, v in decls.items())
                 blocks.append(f".{cls}{suffix} {{\n{body}\n}}")
         text = "\n\n".join(blocks)
+        # Per-element responsive rules, widest breakpoint first (narrower ones win).
+        order = sorted(media, key=lambda q: -_query_width(q))
+        media_text = "\n\n".join(f"{q} {{\n" + "\n".join(media[q]) + "\n}" for q in order)
+        text = text + MEDIA_MARK + media_text
         # Colour tokens: colours used 3+ times become custom properties.
         colors = Counter(re.findall(r"#[0-9a-f]{6}\b|rgba\([^)]*\)", text))
         tokens = {}
@@ -1345,7 +1687,9 @@ class Generator:
         root_lines += [f"  --font-{slug(f, 'font')}: '{f}', system-ui, sans-serif;" for f in families]
         root_lines += [f"  {var}: {val};" for var, val in self.tokens]
         root = ":root {\n" + "\n".join(root_lines) + "\n}"
-        return root, text
+        rules_text, _, media_text = text.partition(MEDIA_MARK)
+        self.media_css = media_text
+        return root, rules_text
 
     def tokenize(self) -> None:
         """Values repeated across the stylesheet become named tokens (spacing, radii, shadows, sizes)."""
@@ -1386,8 +1730,12 @@ class Generator:
                             decls[k] = f"var({names[v]})"
 
     # ------------------------------------------------------------------ main
-    def add_page(self, page: Page, filename: str) -> dict:
-        """Renders one page into the shared class registry. Call finish() after the last page."""
+    def add_page(self, page: Page, filename: str, frames: dict[str, Page] | None = None) -> dict:
+        """Renders one page into the shared class registry. Call finish() after the last page.
+
+        `frames` holds the page's other breakpoints ({"mobile": Page, "tablet": Page}): their
+        differences are written as media queries and their expectations kept for the phone check.
+        """
         self.page = page
         self.expect = []
         self.warnings.extend(w for w in page.warnings if w not in self.warnings)
@@ -1398,6 +1746,21 @@ class Generator:
         if page.container:
             self.container_width = max(self.container_width, page.container[1])
             self.design_width = max(self.design_width, page.width)
+        matches = {}
+        for role, fpage in (frames or {}).items():
+            query = MOBILE_Q if role == "mobile" else TABLET_Q
+            mt = bp.match(page, fpage, self.asset_hashes)
+            matches[role] = mt
+            for eid, decls in bp.derive_css(page, fpage, mt).items():
+                if eid == bp.ROOT_KEY:
+                    self.root_media.setdefault(query, {}).update(decls)
+                    continue
+                self.frame_css.setdefault(eid, {}).setdefault(query, {}).update(decls)
+            if mt.mobile_only:
+                self.assumptions.append(
+                    f"{page.name}: {len(mt.mobile_only)} layers exist only in the {role} frame "
+                    "and are not generated yet."
+                )
         body_parts = []
         prev_bottom = 0.0
         self._stack = set()
@@ -1419,6 +1782,10 @@ class Generator:
                 self.components[sec.component] = html_part
             body_parts.append(html_part)
         self.fit_width = max(self.fit_width, self.content_width(page))
+        self.frame_checks[filename] = [
+            (role, fpage, bp.expectations(self.expect, page, fpage, matches[role]))
+            for role, fpage in (frames or {}).items()
+        ]
         return {
             "name": page.name,
             "file": filename,
@@ -1513,7 +1880,12 @@ class Generator:
         if not any(f["role"] == "mobile" for f in self.bundle["frames"]):
             self.assumptions.append("No mobile frame: a simple stacked mobile layout was inferred below 768px.")
         fit = self.fit_css(pages[0]["width"] if pages else 1440) if self._fit_sections else ""
-        css = "\n\n".join(p for p in [faces, root_css, base, rules_css, fit, responsive] if p) + "\n"
+        frames = (
+            ("/* Breakpoints from the design (mobile / tablet frames and fluid adjustments) */\n" + self.media_css)
+            if self.media_css
+            else ""
+        )
+        css = "\n\n".join(p for p in [faces, root_css, base, rules_css, fit, responsive, frames] if p) + "\n"
         site = html.escape(self.bundle["source"].get("fileName", "Site"))
         font_link = f'  <link rel="stylesheet" href="{html.escape(google_href)}">\n' if google_href else ""
         corrections = out_dir / "css" / "corrections.css"
@@ -1572,8 +1944,11 @@ def generate_site(
     out_dir: Path,
     font_dir: Path | None = None,
     asset_hashes: dict[str, str] | None = None,
+    frames: dict[str, dict[str, Page]] | None = None,
 ) -> Output:
-    """Several pages sharing one stylesheet, images, fonts and component classes."""
+    """Several pages sharing one stylesheet, images, fonts and component classes.
+
+    `frames` maps a page file to its other breakpoints ({"mobile": Page, "tablet": Page})."""
     if out_dir.exists():
         shutil.rmtree(out_dir)
     gen = Generator(None, bundle, asset_dir, font_dir)
@@ -1581,8 +1956,9 @@ def generate_site(
     gen.page_links = {_norm(page.name): filename for page, filename in pages}
     if len(pages) > 1:
         gen.page_links.update({"home": pages[0][1]})
-    results = [gen.add_page(page, filename) for page, filename in pages]
+    results = [gen.add_page(page, filename, (frames or {}).get(filename)) for page, filename in pages]
     out = gen.finish(out_dir, results)
+    out.frame_checks = gen.frame_checks
     meta = {
         "pages": [{k: v for k, v in r.items() if k not in ("body",)} for r in results],
         "components": out.components,

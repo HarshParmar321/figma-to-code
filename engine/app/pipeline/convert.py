@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -49,8 +50,15 @@ def convert(
 ) -> dict:
     say = progress or (lambda _msg: None)
     started = time.time()
-    asset_hashes = asset_hashes or {}
+    asset_hashes = dict(asset_hashes or {})
     assets = {a["id"]: a for a in bundle["assets"]}
+    # Content hashes for any asset the caller did not hash (same bytes = same image in every frame).
+    for a in bundle["assets"]:
+        if a["id"] not in asset_hashes:
+            ext = {"PNG": "png", "JPG": "jpg", "SVG": "svg", "GIF": "gif", "WEBP": "webp"}.get(a["format"], "bin")
+            f = bundle_dir / "assets" / f"{a['id']}.{ext}"
+            if f.exists():
+                asset_hashes[a["id"]] = hashlib.sha256(f.read_bytes()).hexdigest()
 
     say("Reading layers")
     groups = site_pages(build_pages(bundle))
@@ -69,6 +77,10 @@ def convert(
     say("Building layout")
     for p in pages:
         layout_page(p)
+    for g in groups:
+        for role_name in ("tablet", "mobile"):
+            if g.get(role_name) is not None and g[role_name] is not g["desktop"]:
+                layout_page(g[role_name])
 
     files, used = [], set()
     for i, p in enumerate(pages):
@@ -80,6 +92,10 @@ def convert(
 
     say("Writing HTML and CSS")
     out_dir = bundle_dir / "output"
+    frames = {
+        file: {r: g[r] for r in ("tablet", "mobile") if g.get(r) is not None and g[r] is not g["desktop"]}
+        for g, file in zip(groups, files, strict=True)
+    }
     gen = generate_site(
         list(zip(pages, files, strict=True)),
         bundle,
@@ -87,6 +103,7 @@ def convert(
         out_dir,
         font_dir=font_dir,
         asset_hashes=asset_hashes,
+        frames=frames,
     )
 
     result: dict = {
@@ -98,17 +115,16 @@ def convert(
         "warnings": gen.warnings,
         "fidelity": None,
     }
-    mobile_frames = [g["name"] for g in groups if g["mobile"] is not None]
-    if mobile_frames:
-        result["assumptions"].append(
-            "Mobile frames were read for " + ", ".join(mobile_frames) + "; matching them into the responsive "
-            "layout is coming next, so phones currently use the inferred stacked layout."
-        )
+    merged = [f"{g['name']} ({', '.join(r for r in ('tablet', 'mobile') if g.get(r) is not None)})"
+              for g in groups if g.get("mobile") is not None or g.get("tablet") is not None]  # fmt: skip
+    if merged:
+        result["assumptions"].append("Breakpoint frames merged into media queries: " + "; ".join(merged) + ".")
 
     fid_dir = bundle_dir / "fidelity"
     if fid_dir.exists():
         shutil.rmtree(fid_dir)
     page_results = []
+    breakpoint_results: dict[str, dict] = {}
     if run_verify:
         try:
             with Renderer(chromium_path) as renderer:
@@ -143,6 +159,20 @@ def convert(
                                       preview_href=back + file)  # fmt: skip
                     applied = sum(1 for nid in fixes if nid in fid["measurements"])
                     page_results.append((p, file, fid, first_score, rounds, applied, pdir))
+                    for frame_role, fpage, fexp in getattr(gen, "frame_checks", {}).get(file, []):
+                        fref = _reference(bundle_dir, fpage.frame, assets)
+                        if fref is None or not fexp:
+                            continue
+                        say(f"Checking {label} on {frame_role} against the {frame_role} frame")
+                        fdir = pdir / frame_role
+                        ffid = verify(out_dir, fdir, fpage, fexp, fref, renderer=renderer, html_file=file)
+                        write_compare_images(fref, fdir / "render.png", fdir)
+                        title = f"{p.name} ({frame_role}) · {bundle['source'].get('fileName', 'Design')}"
+                        write_report_html(ffid, fdir, title, preview_href="../" + back + file)
+                        breakpoint_results.setdefault(file, {})[frame_role] = {
+                            k: ffid[k] for k in ("score", "band", "subScores", "counts", "sections", "missingFonts")
+                        } | {"topIssues": ffid["issues"][:10], "width": fpage.width,
+                             "report": str(fdir.relative_to(bundle_dir) / "report.html")}  # fmt: skip
                 say("Checking code quality and screen sizes")
                 widths = {f: round(pg.width) for pg, f in zip(pages, files, strict=True)}
                 result["quality"] = quality.analyze(out_dir, files, renderer, widths)
@@ -163,6 +193,8 @@ def convert(
             entry["fidelity"].update({"topIssues": fid["issues"][:10], "firstScore": first,
                                       "correctionRounds": rounds, "corrections": applied})  # fmt: skip
             entry["report"] = str(pdir.relative_to(bundle_dir) / "report.html")
+        if file in breakpoint_results:
+            entry["breakpoints"] = breakpoint_results[file]
         result["pages"].append(entry)
 
     scored = [pg["fidelity"] for pg in result["pages"] if pg.get("fidelity")]
@@ -194,6 +226,16 @@ def convert(
         }
         if len(scored) > 1:
             write_site_report(result, fid_dir, bundle["source"].get("fileName", "Design"))
+    for frame_role in ("tablet", "mobile"):
+        got = [pg["breakpoints"][frame_role] for pg in result["pages"] if frame_role in pg.get("breakpoints", {})]
+        if got:
+            w = [max(1, f["counts"]["elements"]) for f in got]
+            sc = sum(f["score"] * x for f, x in zip(got, w, strict=True)) / sum(w)
+            if any(f["counts"]["critical"] for f in got):
+                sc = min(sc, 69.0)
+            result[frame_role] = {"score": round(sc, 1), "pages": len(got),
+                                  "elementsInPlace": sum(f["counts"]["geometryPass"] for f in got),
+                                  "elements": sum(f["counts"]["elements"] for f in got)}  # fmt: skip
 
     if "quality" not in result:
         result["quality"] = quality.analyze(out_dir, files)  # structure only (no browser check ran)

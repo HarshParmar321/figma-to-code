@@ -7,7 +7,7 @@ Most Figma-to-code tools give you either a picture-perfect page that no develope
 - **Fidelity** (0–100): does it match Figma? It checks positions and sizes, typography, colours, images and visual similarity per section.
 - **Code quality** (0–100): is it code a front-end developer would ship? It looks at structure, headings, alt text and fixed sizes, then renders the page at 390, 768 and 1280px to catch sideways scrolling, overlapping text and text pushed off screen.
 
-> **Status: v0.5.** See [PROCESS.md](PROCESS.md) for what has been built, the results on real designs and what remains.
+> **Status: v0.6.** See [PROCESS.md](PROCESS.md) for what has been built, the results on real designs and what remains.
 
 ## What it does today
 
@@ -19,6 +19,13 @@ Most Figma-to-code tools give you either a picture-perfect page that no develope
   - a shared `.btn` component and design tokens (CSS variables)
   - semantic HTML: `header`, `nav > ul > li > a`, sections with ids, a proper heading order, and alt text
 - **Single-page navigation:** menu links scroll smoothly to the section of the same name, and buttons like "Contact us" or "Get in touch" go to the contact section.
+- **Every screen size:**
+  - mobile and tablet frames become media queries, and the phone layout is checked against your mobile frame
+  - without them, the layout reflows by itself
+  - big type and spacing scale smoothly with `clamp()`
+  - Figma Auto Layout settings (gap, padding, alignment, fill / hug / fixed) are used as they are
+- **Real forms:** drawn input fields become `<form>`, `<input>`, `<textarea>` and `<button type="submit">`.
+- **Clean download:** the zip has no internal attributes, the corrections are folded into the real classes, and a README is included.
 - **Self-correcting:** elements that land off their Figma position are fixed in `css/corrections.css` (desktop only) over up to 6 rounds.
 - **Hard designs:**
   - masks, cropped images and exact gradients
@@ -36,9 +43,10 @@ engine/             Engine (Python 3.11+, FastAPI)
   app/main.py       HTTP API, background conversion jobs
   app/storage.py    bundle storage, disk housekeeping
   app/pipeline/     ir → layout → generate → fidelity → corrections, orchestrated by convert.py
-                    components.py (shared sections), quality.py (code quality score), fonts.py
+                    components.py (shared sections), breakpoints.py (mobile/tablet frames),
+                    quality.py (code quality score), export.py (clean download), fonts.py
   app/spike_report.py   design check (Auto Layout coverage, sections, tips)
-  tests/            86 tests (browser tests run when Chromium is installed)
+  tests/            97 tests (browser tests run when Chromium is installed)
 fixtures/           sample bundle + generator script
 docs/               pipeline notes (every version) and the first spike
 PROCESS.md          progress log: done, results, remaining
@@ -80,7 +88,7 @@ Check it at http://localhost:8000/health. Each conversion is stored in `engine/d
 | Path | What |
 | --- | --- |
 | `output/` | The generated site: `index.html` (+ one file per page), `css/styles.css`, `css/corrections.css`, `components/`, `images/`, `fonts/` |
-| `fidelity/report.html` | Score, breakdown, side-by-side and difference images, issues (multi-page: a site summary plus one folder per page) |
+| `fidelity/report.html` | Score, breakdown, side-by-side and difference images, issues (multi-page: a site summary plus one folder per page; `mobile/` and `tablet/` subfolders for breakpoint checks) |
 | `conversion.json` | Summary of the last conversion: both scores, pages, components, issues |
 
 Only the 8 most recent conversions are kept. The download zip is built when you click **Download code**.
@@ -95,9 +103,9 @@ npm run build      # or: npm run watch
 
 In the Figma desktop app, open a design file and press **Cmd + /**. Run **Import plugin from manifest** and choose `plugin/manifest.json`, then run **Figma to Code (dev)**.
 
-1. Select one desktop frame per page (Home, About, Contact…), plus their mobile frames if you have them, all on the same Figma page.
+1. Select one desktop frame per page (Home, About, Contact…), plus a mobile (and tablet) frame per page if you have them, all on the same Figma page. Name them alike ("Home / Desktop", "Home / Mobile") so they are paired.
 2. Click **Convert to code** and watch the steps: Read design → Upload → Generate and check (including correction rounds).
-3. Review the fidelity score, the code quality score, the pages and the shared components. Then use **Open preview**, **Report** or **Download code**.
+3. Review the fidelity score, the phone/tablet scores (when you gave those frames), the code quality score, the pages and the shared components. Then use **Open preview**, **Report** or **Download code**.
 
 During development the plugin can only reach `http://localhost:8000` (see `networkAccess` in the manifest).
 
@@ -130,7 +138,7 @@ Free Google fonts load automatically. For any other font (for example a paid fon
 | GET | `/v1/bundles/{id}/conversion` | Last conversion result |
 | GET | `/v1/bundles/{id}/output/{path}` | Live preview of the generated site |
 | GET | `/v1/bundles/{id}/fidelity/{path}` | Fidelity report and images |
-| GET | `/v1/bundles/{id}/code.zip` | Download the generated code |
+| GET | `/v1/bundles/{id}/code.zip` | Download the clean code (no internal attributes, corrections folded into classes) |
 | GET | `/v1/fonts` | Font families available for self-hosting |
 | PUT | `/v1/fonts/{family}/{filename}` | Upload a font file (max 15 MB) |
 

@@ -78,17 +78,28 @@ def page(prefix, role, width, height, ox):
 
     add(f"{p}:10", "Hero", "FRAME", f"{p}:1", 0, 72, width, 560, ox, 72,
         **auto(hero_dir, 48, (100 if role == "desktop" else 48, pad, 100 if role == "desktop" else 48, pad)))
-    add(f"{p}:11", "Content", "FRAME", f"{p}:10", pad, 100, 560, 320, ox + pad, 172, **auto("VERTICAL", 24, (0, 0, 0, 0)))
-    add(f"{p}:12", "Title", "TEXT", f"{p}:11", 0, 0, 560, title_line * 2, ox + pad, 172,
+    # Desktop: text column and image side by side, cards in a row. Mobile: everything stacked in a
+    # 358px column (16px side padding), the way a real mobile frame is drawn.
+    mob = role != "desktop"
+    cw = width - 2 * pad if mob else 560
+    title_h = title_line * 2
+    body_h = 84 if mob else 56
+    body_y = title_h + 24 if mob else 168
+    btn_y = body_y + body_h + 24 if mob else 248
+    content_h = btn_y + 48 if mob else 320
+    top = 72 + (48 if mob else 100)
+    add(f"{p}:11", "Content", "FRAME", f"{p}:10", pad, top - 72, cw, content_h, ox + pad, top,
+        **auto("VERTICAL", 24, (0, 0, 0, 0)))
+    add(f"{p}:12", "Title", "TEXT", f"{p}:11", 0, 0, cw, title_h, ox + pad, top,
         **text("Build better experiences", INTER_BOLD, title_size, title_line, resize="HEIGHT"))
     body = "Design in Figma, ship verified code."
-    add(f"{p}:13", "Body", "TEXT", f"{p}:11", 0, 168, 560, 56, ox + pad, 340,
+    add(f"{p}:13", "Body", "TEXT", f"{p}:11", 0, body_y, cw, body_h, ox + pad, top + body_y,
         **text(body, INTER, 18, 28, resize="HEIGHT", segments=[
             {"characters": "Design in Figma, ", "start": 0, "end": 17, "fontName": INTER, "fontSize": 18},
             {"characters": "ship verified code.", "start": 17, "end": len(body), "fontName": INTER_BOLD,
              "fontSize": 18},
         ]))
-    add(f"{p}:14", "Button", "INSTANCE", f"{p}:11", 0, 248, 160, 48, ox + pad, 420,
+    add(f"{p}:14", "Button", "INSTANCE", f"{p}:11", 0, btn_y, 160, 48, ox + pad, top + btn_y,
         **auto("HORIZONTAL", 8, (12, 24, 12, 24), primary="CENTER", counter="CENTER"),
         fills=BRAND, cornerRadius=8, mainComponentId="50:1",
         variantProperties={"State": "Default"},
@@ -97,19 +108,30 @@ def page(prefix, role, width, height, ox):
             "transition": {"type": "SMART_ANIMATE", "easing": {"type": "EASE_OUT"}, "duration": 0.2}}]}],
         motion={"preset": "fade-up", "trigger": {"type": "in-view", "threshold": 0.2, "once": True},
                 "duration": 600, "delay": 200})
-    add(f"{p}:15", "Label", "TEXT", f"{p}:14", 24, 12, 112, 24, ox + pad + 24, 432,
+    add(f"{p}:15", "Label", "TEXT", f"{p}:14", 24, 12, 112, 24, ox + pad + 24, top + btn_y + 12,
         **text("Get started", INTER_BOLD, 16, 24), fills=WHITE)
-    add(f"{p}:16", "Hero image", "RECTANGLE", f"{p}:10", 688, 100, 672, 360, ox + 688, 172,
+    img_w, img_h = (cw, round(cw * 360 / 672)) if mob else (672, 360)
+    img_x, img_y = (pad, top + content_h + 48) if mob else (688, 172)
+    add(f"{p}:16", "Hero image", "RECTANGLE", f"{p}:10", img_x, img_y - 72, img_w, img_h, ox + img_x, img_y,
         cornerRadius=16, fills=[{"type": "IMAGE", "visible": True, "scaleMode": "FILL",
                                  "imageHash": IMAGE_HASH}],
         effects=[{"type": "DROP_SHADOW", "visible": True, "radius": 24, "offset": {"x": 0, "y": 8},
                   "color": {"r": 0, "g": 0, "b": 0, "a": 0.12}, "spread": 0}])
+    hero_h = (img_y + img_h + 48 - 72) if mob else 560
+    nodes[f"{p}:10"]["height"] = hero_h
+    nodes[f"{p}:10"]["absoluteBoundingBox"]["height"] = hero_h
 
     # A group (no layout data) to exercise the GROUPS_WITH_CHILDREN finding.
-    add(f"{p}:20", "Features", "GROUP", f"{p}:1", 0, 632, width, 300, ox, 632)
-    add(f"{p}:21", "Card 1", "RECTANGLE", f"{p}:20", pad, 0, 300, 300, ox + pad, 632, cornerRadius=12, fills=CARD)
-    add(f"{p}:22", "Card 2", "RECTANGLE", f"{p}:20", pad + 332, 0, 300, 300, ox + pad + 332, 632,
+    fy = 72 + hero_h
+    card_w = cw if mob else 300
+    second = (pad, fy + 16 + 332) if mob else (pad + 332, fy)
+    first = (pad, fy + 16) if mob else (pad, fy)
+    gh = 664 + 16 if mob else 300
+    add(f"{p}:20", "Features", "GROUP", f"{p}:1", 0, fy, width, gh, ox, fy)
+    add(f"{p}:21", "Card 1", "RECTANGLE", f"{p}:20", first[0], first[1] - fy, card_w, 300, ox + first[0], first[1],
         cornerRadius=12, fills=CARD)
+    add(f"{p}:22", "Card 2", "RECTANGLE", f"{p}:20", second[0], second[1] - fy, card_w, 300, ox + second[0],
+        second[1], cornerRadius=12, fills=CARD)
 
     add(f"{p}:30", "Footer", "FRAME", f"{p}:1", 0, height - 120, width, 120, ox, height - 120,
         **auto("HORIZONTAL", 16, (40, pad, 40, pad)))
@@ -119,6 +141,8 @@ def page(prefix, role, width, height, ox):
 
 page("10", "desktop", 1440, 1100, 0)
 page("20", "mobile", 390, 1500, 1600)
+_m_bottom = nodes["20:20"]["absoluteBoundingBox"]["y"] + nodes["20:20"]["absoluteBoundingBox"]["height"]
+assert _m_bottom <= 1380, _m_bottom  # mobile footer starts at 1380
 
 bundle = {
     "schemaVersion": "0.1",

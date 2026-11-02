@@ -87,6 +87,19 @@ Before: every element copied its exact Figma box (fixed width and height on all 
 
 Results: cleaning page 99.9 fidelity with **0 corrections on the first render**, code quality 94 (Excellent); services page 83 elements (TT Hoves cap), quality 92; Peachy Pup 91/94 (TT Hoves), quality 84; 2-page site 99.1, quality 89.
 
+## v0.6: really responsive, clean download
+
+| Area | How it works |
+| --- | --- |
+| **Clean export** (`export.py`) | The zip is built on download from the preview: `data-*` instruments removed, `corrections.css` folded into the classes (a `--tuned-N` modifier when only some users of a class are corrected), README.txt added. |
+| **Auto Layout** (`auto_flow_css`) | Gap (`itemSpacing`), padding, `primaryAxisAlignItems` → `justify-content`, `counterAxisAlignItems` → `align-items`, wrap → `flex-wrap` + `row-gap`/`column-gap`, child FILL → `flex: 1 1 0` / `align-self: stretch`, HUG → no size, FIXED → max-width / flex-basis, ABSOLUTE children, fixed height → `min-height`. |
+| **Breakpoint frames** (`breakpoints.py`) | Match desktop ↔ mobile elements (text, image hash, layer name; i-th occurrence ↔ i-th), boxes by their contents, sections by votes. `derive_css` writes per-element differences into the element's class under `@media (max-width: 767px)` (tablet: 1023px): text size / line height / max-width / align, hidden elements, rows → columns with gaps and `order`, grid columns, paddings (exact Auto Layout padding when the frame has it), section spacing and min-height, phone gutter on `:root`. Mobile expectations re-target desktop element ids at mobile boxes; the conversion runs a second check at the mobile width. |
+| **Fluid scale** (`fluid_value`) | `clamp(phone, a + b·vw, design)`: exact at the design width, the phone value at 390px. Font sizes ≥ 32px (one-line headings sized to fit 358px), line heights on the same curve, paddings / gaps / margins ≥ 64px. |
+| **Phones without frames** | Section layers covering the section use `inset: 0` (follow its height); big layers cover the section on phones, small decorations and round glows are hidden, small photos join the flow. Inside compositions: no absolute positioning, decorations hidden, large paddings and margins reduced, stage becomes a flex column. |
+| **Forms** | `detect_forms`: ≥ 2 drawn inputs with the same left edge and width (≤ 1 short text each) + a button below (or the one differently styled box) → `<form>`, `<input type>` / `<textarea>`, `<button type="submit">`; loose fields in a section column are wrapped in their own `<form>`. |
+
+Results: desktop fidelity unchanged on every real design (cleaning 99.9 with 0 corrections; Peachy Pup and services capped by the TT Hoves font); Auto Layout sample: quality 100, phone layout 11/15 elements against its mobile frame (the misses are the fixture's synthetic text boxes). 97 engine tests.
+
 ## Known limits (next steps)
 
 1. **Mobile frames:** read and paired with their page, but not yet merged into media queries (desktop/mobile element matching, FR-EXT-14). This is the next major step.

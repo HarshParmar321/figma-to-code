@@ -12,19 +12,22 @@ Every conversion proves itself with two scores: **fidelity** (does it match Figm
 
 ---
 
-## Current status: v0.5
+## Current status: v0.6
 
 | Real design | Layers | Fidelity at design width | Elements in place | Code quality |
 | --- | --- | --- | --- | --- |
 | Cleaning landing page | 179 | **99.9** (correct on the first render, 0 corrections) | 88 / 88 | **94** Excellent |
 | Moving services page | ~500 | 69\* | 76 / 83 | **92** Excellent |
 | Peachy Pup Bakery | 10,949 | 69\* (section similarity 98 / 95 / 95 / 100%) | 91 / 94 | **84** Good |
-| Two-page test site | 2 × 179 | **99.1** | shared header, footer and 2 sections | **89** Good |
+| Two-page test site | 2 × 179 | **99.1** | shared header, footer and 2 sections | **88** Good |
+| Sample (Auto Layout + mobile frame) | 34 | desktop 12 / 15 · **phone 11 / 15** (checked against the mobile frame)† | | **100** Excellent |
 
 \* Capped at 69 because the paid font **TT Hoves** is not installed. Every missed element on these two pages is TT Hoves text. Once the font files are uploaded, the score is expected to be in the high 90s.
 
+† The sample's text boxes are synthetic (widths that no real font produces); every miss on desktop and phone is one of those boxes.
+
 - **Speed:** Peachy Pup (10,949 layers) converts and checks in about 15 seconds. Before v0.4 the check never finished.
-- **Tests:** 86 engine tests and 9 plugin tests, plus lint and format checks in CI.
+- **Tests:** 97 engine tests and 9 plugin tests, plus lint and format checks in CI.
 
 ---
 
@@ -98,23 +101,36 @@ Every conversion proves itself with two scores: **fidelity** (does it match Figm
   - smooth scrolling, a proper heading order, and alt text taken from the nearest heading
 - **Code quality score** shown in the plugin: structure plus responsive health at 390, 768 and 1280px.
 
+### v0.6: really responsive, clean download
+
+- **Clean export:** the downloaded zip has no `data-figma-id`, `data-section` or other instruments. Corrections are folded into the real classes (or a small `--tuned-N` modifier when only some elements of a class need one) under one "Desktop fine-tuning" block, and a README.txt is included. The live preview keeps the instruments for the check.
+- **Auto Layout as the source of truth:** frames with Auto Layout are written from their own settings: gap, padding, `justify-content` / `align-items` from the alignment, wrap with row and column gaps, children set to fill (`flex: 1 1 0` / `align-self: stretch`), hug or fixed, absolute children, and fixed heights as `min-height`. The Auto Layout sample scores 100 on code quality.
+- **Mobile and tablet frames → media queries:** elements are matched between frames (same text, same image bytes, same layer name, in reading order). Only the differences are written, per element, in `@media (max-width: 767px)` (mobile) or `(max-width: 1023px)` (tablet):
+  - font size, line height and line length
+  - rows turned into columns, gaps, `order`, and grid columns
+  - section padding and spacing, box padding, and the phone gutter
+  - elements missing from the mobile frame are hidden
+- **Phone check:** the page is rendered at the mobile frame's width and every matched element is measured against the mobile frame. Its score is shown next to the desktop score ("Other screen sizes" in the plugin).
+- **Fluid type and spacing:** headings from 32px and spacing from 64px use `clamp()`. They are exact at the design width and shrink smoothly to a phone size; one-line headings are sized to fit a phone. Line height follows the same curve, so the desktop pixel check is unchanged.
+- **Phones without a mobile frame:**
+  - background layers that cover their section follow its height (`inset: 0`), big ones cover the section, and small decorations are hidden
+  - sections built from overlapping layers become a vertical flow (no absolute positioning, smaller paddings, decorations hidden)
+- **Forms:** two or more equal drawn inputs in a column plus a button become `<form>`, `<input>` / `<textarea>` (type from the placeholder: email, tel, url…) and `<button type="submit">`. They get `font: inherit`, the placeholder style and aria-labels.
+- **Fixes:** containers inside composition sections no longer subtract the gutter at full width (this caused uniform -24px corrections), and identical icons in different frames are matched by content hash.
+
 Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-v0.2.md).
 
 ---
 
 ## What remains
 
-### v0.6: really responsive (next)
+### v0.6 follow-ups
 
-- [ ] Use Figma's **Auto Layout sizing** (fill / hug / fixed) and **constraints** as the source of truth whenever the file has them.
-- [ ] **Merge mobile and tablet frames:** match elements across frames (by name, text, image and order) and write only the differences as media queries.
-- [ ] **Better phone layout without a mobile frame:**
-  - background layers follow their section's height
-  - sections built from overlapping layers reflow instead of being scaled down
-  - font sizes scale smoothly (`clamp()`)
-- [ ] **Forms:** input fields drawn as rectangles become `<input>` / `<textarea>` / `<button>`.
-- [ ] **Clean export:** remove the `data-figma-id` attributes and merge the corrections into the real classes in the downloaded zip.
-- [ ] Remove the remaining scaling fallback for overlapping compositions.
+- [ ] Test on a **real** file with mobile frames (only the sample has been checked so far), and tune the matching on it.
+- [ ] Elements that exist **only** in the mobile frame (for example a hamburger icon) are counted, not generated yet.
+- [ ] **Phones for overlapping compositions** (like the Peachy Pup hero): text drawn on top of a panel as a separate layer loses its panel when the layers stack, so a mobile frame is needed for a designed result.
+- [ ] Between 768px and the content width, composition sections still scale down like browser zoom instead of reflowing.
+- [ ] Corrections are applied on desktop only; corrections measured against the mobile frame are next.
 
 ### v0.7: navigation and interactions
 
@@ -139,7 +155,7 @@ Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-
 ### Testing still needed
 
 - [ ] A file built with **Auto Layout and components** (all real files so far were flat).
-- [ ] A file with **mobile frames**.
+- [ ] A real file with **mobile frames** (the merge is built and tested on the sample only).
 - [ ] A file with **hover variants and prototype links**.
 - [ ] A **single-page site with a header menu**.
 - [ ] A regression set of 15–20 real community files with expected scores, checked in CI on every change.
@@ -149,7 +165,6 @@ Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-
 ## Known limits right now
 
 - Without the real font files, text measures slightly differently and the score is capped (this is intentional).
-- Phones get an inferred stacked layout. Background images keep their desktop height, and sections built from overlapping layers don't rearrange yet.
-- Between 768px and the content width, sections built from overlapping layers scale down like browser zoom instead of reflowing.
-- Hover states, animations, forms and the WordPress export are not generated yet.
-- The generated HTML still carries `data-figma-id` attributes, which the design check and the corrections rely on.
+- Phones without a mobile frame get an inferred layout. Normal sections reflow well; sections built from overlapping layers become a plain vertical flow that is readable but not designed.
+- Hover states, animations and the WordPress export are not generated yet.
+- The live preview carries `data-figma-id` attributes for the check; the downloaded code does not.

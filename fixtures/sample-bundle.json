@@ -1072,12 +1072,12 @@
       "x": 0,
       "y": 72,
       "width": 390,
-      "height": 560,
+      "height": 604,
       "absoluteBoundingBox": {
         "x": 1600,
         "y": 72,
         "width": 390,
-        "height": 560
+        "height": 604
       },
       "layoutMode": "VERTICAL",
       "fills": [],
@@ -1111,14 +1111,14 @@
       "blendMode": "PASS_THROUGH",
       "rotation": 0,
       "x": 16,
-      "y": 100,
-      "width": 560,
-      "height": 320,
+      "y": 48,
+      "width": 358,
+      "height": 268,
       "absoluteBoundingBox": {
         "x": 1616,
-        "y": 172,
-        "width": 560,
-        "height": 320
+        "y": 120,
+        "width": 358,
+        "height": 268
       },
       "layoutMode": "VERTICAL",
       "fills": [],
@@ -1149,12 +1149,12 @@
       "rotation": 0,
       "x": 0,
       "y": 0,
-      "width": 560,
+      "width": 358,
       "height": 88,
       "absoluteBoundingBox": {
         "x": 1616,
-        "y": 172,
-        "width": 560,
+        "y": 120,
+        "width": 358,
         "height": 88
       },
       "characters": "Build better experiences",
@@ -1200,14 +1200,14 @@
       "blendMode": "PASS_THROUGH",
       "rotation": 0,
       "x": 0,
-      "y": 168,
-      "width": 560,
-      "height": 56,
+      "y": 112,
+      "width": 358,
+      "height": 84,
       "absoluteBoundingBox": {
         "x": 1616,
-        "y": 340,
-        "width": 560,
-        "height": 56
+        "y": 232,
+        "width": 358,
+        "height": 84
       },
       "characters": "Design in Figma, ship verified code.",
       "fontName": "MIXED",
@@ -1261,12 +1261,12 @@
       "blendMode": "PASS_THROUGH",
       "rotation": 0,
       "x": 0,
-      "y": 248,
+      "y": 220,
       "width": 160,
       "height": 48,
       "absoluteBoundingBox": {
         "x": 1616,
-        "y": 420,
+        "y": 340,
         "width": 160,
         "height": 48
       },
@@ -1357,7 +1357,7 @@
       "height": 24,
       "absoluteBoundingBox": {
         "x": 1640,
-        "y": 432,
+        "y": 352,
         "width": 112,
         "height": 24
       },
@@ -1416,15 +1416,15 @@
       "opacity": 1,
       "blendMode": "PASS_THROUGH",
       "rotation": 0,
-      "x": 688,
-      "y": 100,
-      "width": 672,
-      "height": 360,
+      "x": 16,
+      "y": 364,
+      "width": 358,
+      "height": 192,
       "absoluteBoundingBox": {
-        "x": 2288,
-        "y": 172,
-        "width": 672,
-        "height": 360
+        "x": 1616,
+        "y": 436,
+        "width": 358,
+        "height": 192
       },
       "fills": [
         {
@@ -1472,14 +1472,14 @@
       "blendMode": "PASS_THROUGH",
       "rotation": 0,
       "x": 0,
-      "y": 632,
+      "y": 676,
       "width": 390,
-      "height": 300,
+      "height": 680,
       "absoluteBoundingBox": {
         "x": 1600,
-        "y": 632,
+        "y": 676,
         "width": 390,
-        "height": 300
+        "height": 680
       },
       "layoutSizingHorizontal": "HUG",
       "layoutSizingVertical": "HUG",
@@ -1496,13 +1496,13 @@
       "blendMode": "PASS_THROUGH",
       "rotation": 0,
       "x": 16,
-      "y": 0,
-      "width": 300,
+      "y": 16,
+      "width": 358,
       "height": 300,
       "absoluteBoundingBox": {
         "x": 1616,
-        "y": 632,
-        "width": 300,
+        "y": 692,
+        "width": 358,
         "height": 300
       },
       "fills": [
@@ -1531,14 +1531,14 @@
       "opacity": 1,
       "blendMode": "PASS_THROUGH",
       "rotation": 0,
-      "x": 348,
-      "y": 0,
-      "width": 300,
+      "x": 16,
+      "y": 348,
+      "width": 358,
       "height": 300,
       "absoluteBoundingBox": {
-        "x": 1948,
-        "y": 632,
-        "width": 300,
+        "x": 1616,
+        "y": 1024,
+        "width": 358,
         "height": 300
       },
       "fills": [

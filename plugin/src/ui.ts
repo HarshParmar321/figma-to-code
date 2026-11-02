@@ -184,6 +184,8 @@ interface Conversion {
     corrections?: number;
     pages?: number;
   };
+  mobile?: { score: number; elementsInPlace: number; elements: number };
+  tablet?: { score: number; elementsInPlace: number; elements: number };
   quality?: {
     score: number;
     band: string;
@@ -234,6 +236,11 @@ function renderResult(r: Conversion) {
   const notes = [...r.assumptions, ...r.warnings].map((n) => `<div class="note">• ${escapeHtml(n)}</div>`).join('');
   const q = r.quality;
   const qBand = q ? (q.score >= 90 ? 'Verified' : q.score >= 75 ? 'Close' : q.score >= 60 ? 'Needs' : 'Failed') : '';
+  const frameRows = (['tablet', 'mobile'] as const)
+    .filter((k) => r[k])
+    .map((k) => `<tr><td>${k === 'mobile' ? 'Phone' : 'Tablet'} (vs your ${k} frame)</td><td class="v">${r[k]!.score.toFixed(1)} · ${r[k]!.elementsInPlace}/${r[k]!.elements}</td></tr>`)
+    .join('');
+  const framesHtml = frameRows ? `<h2>Other screen sizes</h2><table>${frameRows}</table>` : '';
   const qualityHtml = q
     ? `<h2>Code quality</h2><div class="score small"><b class="${qBand}">${q.score.toFixed(0)}</b><span class="band ${qBand}">${escapeHtml(q.band)}</span></div>
        <div class="note">Clean structure ${q.structure.toFixed(0)}/60${q.responsive === null ? '' : ` · Works on phone, tablet and laptop ${q.responsive.toFixed(0)}/40`}</div>
@@ -254,7 +261,7 @@ function renderResult(r: Conversion) {
     : '';
   resultEl.innerHTML = `<div class="result">${scoreHtml}
     <div class="row"><button id="open-preview">Open preview</button><button id="open-report" class="secondary">Report</button><button id="get-code" class="secondary">Download code</button></div>
-    ${pagesHtml}${fontsHtml}${qualityHtml}${notes}${issues}</div>`;
+    ${pagesHtml}${framesHtml}${fontsHtml}${qualityHtml}${notes}${issues}</div>`;
   resultEl.querySelectorAll<HTMLElement>('a[data-page]').forEach((a) => {
     a.onclick = (ev) => {
       ev.preventDefault();
