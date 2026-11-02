@@ -44,6 +44,10 @@ class El:
     component: str | None = None  # shared component name when the section repeats across pages
     mask: dict | None = None  # Figma mask applied to this element (shape clip or image alpha)
     html_id: str | None = None  # id attribute (sections: anchor target for nav links)
+    hidden_base: bool = False  # only shown in an interaction state (hover reveal, open accordion)
+    actions_node: dict | None = None  # layer whose prototype reactions apply (a dissolved clickable frame)
+    link: str | None = None  # href from a prototype connection (page, section, URL)
+    link_attrs: list[str] = field(default_factory=list)  # target, data-open, data-action…
 
     @property
     def right(self) -> float:
@@ -96,6 +100,11 @@ class IRBuilder:
     def __init__(self, bundle: dict):
         self.bundle = bundle
         self.nodes: dict[str, dict] = bundle["nodes"]
+        # Instances with interaction states stay elements (their states are written on them).
+        states = {c["id"] for c in (bundle.get("interactions") or {}).get("components", []) if c.get("states")}
+        self.keep = {
+            n["id"] for n in self.nodes.values() if n.get("type") == "INSTANCE" and n.get("mainComponentId") in states
+        }
         self.asset_ids = {a["id"] for a in bundle["assets"]}
         self.image_assets = {a["imageHash"]: a["id"] for a in bundle["assets"] if a.get("imageHash")}
         self._z = itertools.count()
@@ -172,8 +181,25 @@ class IRBuilder:
         return items
 
     def _flatten(self, node: dict, root: dict) -> list[El]:
-        if not node.get("visible", True) or node.get("opacity", 1) == 0 or node.get("insideSvg"):
+        if node.get("insideSvg"):
             return []
+        if not node.get("visible", True) or node.get("opacity", 1) == 0:
+            if not node.get("_reveal"):
+                return []
+            shown = {**node, "visible": True, "opacity": node.get("opacity") or 1}
+            items = self._flatten(shown, root)
+            for e in items:
+                e.hidden_base = True  # revealed by an interaction state
+                if e.node is shown:
+                    e.node = node
+            return items
+        items = self._flatten_visible(node, root)
+        clickable = node.get("reactions") and node["type"] in FRAME_TYPES | {"GROUP"} and len(items) == 1
+        if clickable and items[0].node is not node and items[0].actions_node is None:
+            items[0].actions_node = node  # a clickable frame that was dissolved: its content clicks
+        return items
+
+    def _flatten_visible(self, node: dict, root: dict) -> list[El]:
         t = node["type"]
         if node.get("exportAs") in ("svg", "png"):
             fmt = node["exportAs"]
@@ -208,7 +234,7 @@ class IRBuilder:
                     return []
                 e.children.extend(self._flatten_children(kids, root))
                 return [e]
-            if self._draws(node) or (node.get("clipsContent") and kids and self._draws(node)):
+            if self._draws(node) or node["id"] in self.keep or (node.get("reactions") and len(kids) > 1):
                 e = self.el(node, root, "box", asset=self._image_asset(node))
                 if not e:
                     return []
@@ -242,9 +268,14 @@ class IRBuilder:
         page = El(root["id"], root["name"], "page", 0, 0, W, H, z=next(self._z), node=root)
         sections: list[El] = []
         kids = [self.nodes[c] for c in root.get("children", []) if c in self.nodes]
+        floating: list[El] = []
         if root.get("layoutMode") == "VERTICAL":
-            # Structured file: each top-level child is a section.
+            # Structured file: each top-level child is a section. Children positioned absolutely
+            # ("Ignore Auto Layout", like a floating menu pill) are layers of the section they sit on.
             for i, k in enumerate(kids):
+                if k.get("layoutPositioning") == "ABSOLUTE":
+                    floating += self.flatten(k, root)
+                    continue
                 items = self.flatten(k, root)
                 if not items:
                     continue
@@ -271,7 +302,15 @@ class IRBuilder:
                 )
                 sections.append(sec)
 
+        for f in floating:
+            mid = f.y + f.h / 2
+            host = next((s_ for s_ in sections if s_.y <= mid < s_.bottom), sections[0] if sections else None)
+            if host is not None:
+                f.layout["floating"] = True
+                host.layers.append(f)
         for sec in sections:
+            if root.get("layoutMode") != "VERTICAL":
+                self._adopt_band_frame(sec, W)
             self._pull_backgrounds(sec, W)
         page.children = sections
         return Page(
@@ -285,6 +324,25 @@ class IRBuilder:
             frame=frame,
             name=frame.get("page") or page_name(frame["name"]),
         )
+
+    @staticmethod
+    def _adopt_band_frame(sec: El, page_width: float) -> None:
+        """A full-width frame holding the whole band (a "Header" or "Footer" frame with a fill) is the
+        section itself: its fill, border and shadow go on the section and its layers become the
+        section's content (instead of a design-width box inside it)."""
+        boxes = [e for e in sec.children if e.kind == "box" and e.w >= page_width * FULL_WIDTH_RATIO and not e.mask]
+        if len(boxes) != 1:
+            return
+        frame = boxes[0]
+        others = [e for e in sec.children if e is not frame]
+        if any(not frame.contains(o, tol=2) for o in others) or frame.deco:
+            return
+        sec.node = frame.node
+        sec.auto = frame.auto
+        sec.x, sec.y, sec.w, sec.h = frame.x, frame.y, frame.w, frame.h
+        sec.children = frame.children + others
+        sec.layers = frame.layers + sec.layers
+        sec.asset = frame.asset
 
     @staticmethod
     def _pull_backgrounds(sec: El, page_width: float) -> None:
@@ -335,6 +393,12 @@ def site_pages(pages: list[Page]) -> list[dict]:
         g = groups.setdefault(key, {"name": p.name, "desktop": None, "tablet": None, "mobile": None})
         if g[p.role] is None:
             g[p.role] = p
+    if not any(g["desktop"] for g in groups.values()):
+        # No desktop frame (a phone-only or tablet-only design): the widest frames are the pages.
+        base = "tablet" if any(g["tablet"] for g in groups.values()) else "mobile"
+        for g in groups.values():
+            if g[base] is not None:
+                g["desktop"], g[base] = g[base], None
     result = [g for g in groups.values() if g["desktop"] is not None]
     # A single desktop with differently named mobile/tablet frames: pair them anyway.
     if len(result) == 1:

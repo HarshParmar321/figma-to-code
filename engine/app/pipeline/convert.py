@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -16,6 +17,7 @@ from . import quality
 from .components import detect_shared_sections, split_shared_strips
 from .fidelity import Renderer, verify, write_compare_images, write_report_html, write_site_report
 from .generate import generate_site
+from .interactions import Interactions
 from .ir import build_pages, site_pages
 from .layout import layout_page, share_container
 
@@ -61,6 +63,11 @@ def convert(
                 asset_hashes[a["id"]] = hashlib.sha256(f.read_bytes()).hexdigest()
 
     say("Reading layers")
+    if bundle.get("interactions"):
+        bundle = copy.deepcopy(bundle)  # interaction states add layers to the instances (in memory only)
+    inter = Interactions(bundle)
+    inter.prepare()
+    bundle["_interactions"] = inter
     groups = site_pages(build_pages(bundle))
     if not groups:  # no desktop frame: use whatever was selected
         groups = [{"name": p.name, "desktop": p, "tablet": None, "mobile": None} for p in build_pages(bundle)[:1]]

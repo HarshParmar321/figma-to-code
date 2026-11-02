@@ -15,7 +15,9 @@ from pathlib import Path
 
 from . import breakpoints as bp
 from . import fonts as fontfiles
-from .ir import El, Page
+from . import interactions as ix
+from .ir import El, IRBuilder, Page
+from .layout import apply_container, layout_page
 from .styles import background, border, border_widths, effects, line_height_px, px, radius, text_style
 
 RESETS = {
@@ -47,8 +49,10 @@ FIT_STEP = 32  # zoom steps (px of viewport) between the mobile breakpoint and t
 
 
 def slug(text: str, fallback: str = "section") -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return s[:32].strip("-") or fallback
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:32].strip("-")
+    if s and s[0].isdigit():
+        s = f"{fallback[:1] or 's'}-{s}"  # class names and ids may not start with a digit ("01" -> "s-01")
+    return s or fallback
 
 
 def _font_size(e: El) -> float:
@@ -76,6 +80,12 @@ def _text(chars: str) -> str:
 
 
 MEDIA_MARK = "\n/*@@media@@*/\n"
+BLEND_MODES = {
+    "MULTIPLY": "multiply", "SCREEN": "screen", "OVERLAY": "overlay", "DARKEN": "darken", "LIGHTEN": "lighten",
+    "COLOR_DODGE": "color-dodge", "COLOR_BURN": "color-burn", "HARD_LIGHT": "hard-light", "SOFT_LIGHT": "soft-light",
+    "DIFFERENCE": "difference", "EXCLUSION": "exclusion", "HUE": "hue", "SATURATION": "saturation", "COLOR": "color",
+    "LUMINOSITY": "luminosity", "LINEAR_BURN": "multiply", "LINEAR_DODGE": "screen",
+}  # fmt: skip
 MOBILE_Q = "@media (max-width: 767px)"
 TABLET_Q = "@media (max-width: 1023px)"
 
@@ -170,8 +180,27 @@ class Generator:
         self.asset_hashes: dict[str, str] = {}
         self._by_hash: dict[str, str] = {}
         self.components: dict[str, str] = {}  # component name -> rendered HTML (first occurrence)
+        # Prototype interactions (states, links, overlays); prepared on the bundle by convert().
+        self.inter: ix.Interactions = bundle.get("_interactions") or ix.Interactions(bundle)
+        self.class_of: dict[str, str] = {}  # figma node id -> its main class (for state selectors)
+        self.tag_of: dict[str, str] = {}
+        self.display_of: dict[str, str] = {}
+        self.frame_files: dict[str, str] = {}  # frame root id -> page file (prototype "Navigate to")
+        self._hidden = 0  # > 0 while rendering layers that only show in an interaction state
+        self.js_features: set[str] = set()  # behaviours the page needs from js/site.js
+        self.overlay_uses: dict[str, dict] = {}  # overlay frame id -> the action opening it
+        self._page_overlays: dict[str, dict] = {}  # overlays opened from the page being rendered
+        self._overlay_pages: dict[str, Page] = {}
+        self._in_overlay = 0
+        self.menu_css = ""  # phone menu panel (no mobile frame)
+        self._phone_menus: dict[str, tuple] = {}  # header component -> menu icon from a mobile frame
+        self._frame_derived: dict[tuple, tuple] = {}  # (page, role) -> (match, media CSS by element)
+        self._component_frame_css: dict[str, dict] = {}  # component -> role -> (walk size, {index: css})
+        self.overlay_css: dict[str, str] = {}  # dialog class -> extra CSS (backdrop, animation)
 
     def _expect(self, item: dict) -> None:
+        if self._hidden:
+            return  # not visible in the design's default state: nothing to measure
         item["parent"] = self._anc[-1] if self._anc else None
         self.expect.append(item)
 
@@ -300,6 +329,9 @@ class Generator:
             d.update(effects(n))
         if e.kind == "text":
             d.update(effects(n, is_text=True))
+        blend = BLEND_MODES.get(n.get("blendMode") or "")
+        if blend:
+            d["mix-blend-mode"] = blend  # Figma layer blend mode (Multiply, Exclusion…)
         op = n.get("opacity", 1)
         # Exported SVG/PNG layers already carry the layer's own opacity (Figma bakes it in).
         if isinstance(op, (int, float)) and op < 0.999 and e.kind not in ("svg", "raster"):
@@ -307,7 +339,11 @@ class Generator:
         if e.kind == "box" and e.asset:
             crop = self.image_crop(e)
             d["background-image"] = f"url('../images/{self.image_file(e.asset, e.w, e.h, crop)}')"
-            d["background-size"] = "100% 100%" if crop else "cover"
+            image_fills = [p for p in n.get("fills") or [] if isinstance(p, dict) and p.get("type") == "IMAGE"]
+            mode = next((p.get("scaleMode") for p in image_fills if p.get("visible", True)), "FILL")
+            d["background-size"] = "100% 100%" if crop else {"FIT": "contain", "TILE": "auto"}.get(mode, "cover")
+            if mode == "FIT":
+                d["background-repeat"] = "no-repeat"
             d["background-position"] = "center"
         if (e.kind in ("box", "section")) and n.get("clipsContent"):
             d["overflow"] = "hidden"
@@ -453,6 +489,13 @@ class Generator:
                 continue
             if g > GAP_TOL:
                 per_child[i]["margin-top" if col else "margin-left"] = px(g)
+            elif k == 0 and col and g < -GAP_TOL:
+                per_child[i]["margin-top"] = px(g)  # starts above its frame (a device mockup sticking out)
+        if col and order:
+            last = children[order[-1]]
+            over = last.bottom - (parent.bottom - pb)
+            if over > GAP_TOL and parent.kind == "box" and len(order) == 1:
+                per_child[order[-1]]["margin-bottom"] = px(-over)  # runs past its frame's bottom
         # Cross-axis placement.
         for c, cd in zip(children, per_child, strict=True):
             a, b = (c.x, c.right) if col else (c.y, c.bottom)
@@ -487,6 +530,15 @@ class Generator:
 
     # ------------------------------------------------------------------ render
     def render(self, e: El, placement: dict[str, str], depth: int) -> str:
+        if not e.hidden_base:
+            return self._render(e, placement, depth)
+        self._hidden += 1
+        try:
+            return self._render(e, placement, depth)
+        finally:
+            self._hidden -= 1
+
+    def _render(self, e: El, placement: dict[str, str], depth: int) -> str:
         ind = "  " * depth
         css: dict[str, dict[str, str]] = {"": {}}
         main = css[""]
@@ -497,6 +549,9 @@ class Generator:
 
         if e.node is not None and e.kind not in ("wrapper", "container", "section"):
             attrs.append(f'data-figma-id="{html.escape(e.node["id"])}"')
+        attrs += e.link_attrs
+        attrs += self.state_attrs(e, tag)
+        attrs += self.motion_attrs(e)
 
         if e.role in FIELD_ROLES:
             tag, role, inner = self.field(e, main, css, attrs)
@@ -508,6 +563,8 @@ class Generator:
             if e.html_id:
                 attrs.insert(0, f'id="{html.escape(e.html_id)}"')
             main.update(self.text_css(e))
+            if tag == "a":
+                main.setdefault("text-decoration", "none")  # underlined only when the design is
             inner = self.text_html(e, role)
             self.expect_text(e)
         elif e.kind == "svg" and self._backdrop_blur(e):
@@ -543,6 +600,8 @@ class Generator:
             f = self.image_file(e.asset, e.w, e.h, crop)
             bx, by, bw, bh = self._draw_box(e)
             alt = "" if e.kind in ("svg", "raster") else html.escape(self.alt_text(e))
+            if e.link and e.kind in ("svg", "raster"):
+                alt = html.escape(e.name or "")  # a clickable icon needs a name (Menu, Close…)
             attrs += [f'src="images/{f}"', f'alt="{alt}"', f'width="{round(bw)}"', f'height="{round(bh)}"']
             if e.y > 900:
                 attrs.append('loading="lazy"')
@@ -572,6 +631,14 @@ class Generator:
                 main.update(self.visual(e))
                 if e.overlay:
                     main["z-index"] = "2"
+                root = self.page.root.node or {}
+                inset = (self.page.width - e.right, e.x)
+                if root.get("layoutMode") == "VERTICAL" and e.w < self.page.width - 2 and abs(inset[0] - inset[1]) <= 2:
+                    # Structured page with side padding: the section is a centred column, as in Figma.
+                    main.update({"width": f"min(100% - 2 * var(--gutter), {px(e.w)})", "margin-inline": "auto"})
+                if e.layout.get("sticky"):
+                    # "Fix position when scrolling" in Figma: the header stays at the top.
+                    main.update({"position": "sticky", "top": "0", "z-index": "100"})
                 if e.html_id:
                     attrs.append(f'id="{html.escape(e.html_id)}"')
                 attrs.append(f'data-section="{html.escape(e.role or "")}"')
@@ -599,9 +666,12 @@ class Generator:
                     main.update({"position": "relative", "isolation": "isolate"})
                 if e.role == "button" and e.tag == "button":
                     attrs.append('type="submit"')
-                elif e.role == "button":
+                elif e.role == "button" or e.tag == "a":
                     attrs.append(f'href="{html.escape(self.link_for(e))}"')
                     main["text-decoration"] = "none"
+                    if e.role != "button" and e.tag == "a":
+                        main.setdefault("display", "block")
+                        main.setdefault("color", "inherit")
                 self.expect_box(e)
             else:
                 role = "row" if e.layout.get("mode") == "row" else "stack"
@@ -678,7 +748,8 @@ class Generator:
             cdepth = depth + 2 if stage_css is not None else depth + 1
             measurable = (e.kind == "box" and e.node is not None) or e.kind == "section"
             if measurable:
-                self._anc.append(self.expect[-1]["id"] if e.kind == "section" else e.node["id"])
+                sec_key = f"section:{self.page.frame.get('rootId', 'page')}:{e.id}"
+                self._anc.append(sec_key if e.kind == "section" else e.node["id"])
             if e.layers:
                 if main.get("position", "static") == "static":
                     main["position"] = "relative"
@@ -728,11 +799,44 @@ class Generator:
                 # Placement (margins from the parent) stays on <nav>; the flex row goes on the list.
                 list_cls = self.class_for("menu", css)
                 nav_css = {k: v for k, v in placement.items() if not k.startswith("__")}
-                nav_cls = self.class_for("nav", {"": nav_css}) if nav_css else ""
+                nav_rules = {"": nav_css, **{q: dict(d) for q, d in self.frame_css.get(id(e), {}).items()}}
+                nav_cls = self.class_for("nav", nav_rules) if any(nav_rules.values()) else ""
                 nav_attr = f' class="{nav_cls}"' if nav_cls else ""
                 items = "\n".join(f"{ind}    <li>{part.strip()}</li>" for part in parts)
+                toggle = ""
+                if e.layout.get("auto_menu"):
+                    nav_id = f"menu-{self.section_slug}"
+                    nav_attr += f' id="{nav_id}"'
+                    color = next((t for t in _texts(e)), None)
+                    ink = (
+                        text_style((color.node.get("textSegments") or [{}])[0], color.node).get("color", "currentColor")
+                        if color
+                        else "currentColor"
+                    )
+                    toggle = (
+                        f'{ind}<button class="nav-toggle" type="button" data-nav-toggle aria-expanded="false" '
+                        f'aria-controls="{nav_id}" aria-label="Menu">\n'
+                        f'{ind}  <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">'
+                        '<path d="M3 6h18M3 12h18M3 18h18" '
+                        f'stroke="{ink}" stroke-width="2" stroke-linecap="round"/></svg>\n{ind}</button>\n'
+                    )
+                    bg = background((self.page.sections[0].node or {}).get("fills")).get("background-color", "#ffffff")
+                    self.menu_css = (
+                        "/* Phone menu: the menu does not fit on a phone, so a menu button opens it as a panel */\n"
+                        ".nav-toggle { display: none; padding: 8px; border: 0; background: none; cursor: pointer; }\n"
+                        "@media (max-width: 767px) {\n"
+                        "  .nav-toggle { display: inline-flex; margin-left: auto; }\n"
+                        "  .l-row:has(> .nav-toggle) { flex-direction: row; align-items: center; flex-wrap: wrap; }\n"
+                        f"  #{nav_id} {{ display: none; flex-basis: 100%; }}\n"
+                        f"  .is-nav-open #{nav_id} {{ display: block; background: {bg}; }}\n"
+                        f"  #{nav_id} .l-row {{ flex-direction: column; align-items: flex-start; row-gap: 8px; "
+                        "padding-block: 16px; }\n"
+                        "}"
+                    )
+                list_attrs = "".join(f" {a}" for a in attrs if a.startswith("data-figma-id"))  # a drawn menu (pill)
                 return (
-                    f'{ind}<nav{nav_attr} aria-label="Main">\n{ind}  <ul class="{list_cls} l-row" role="list">\n'
+                    f'{toggle}{ind}<nav{nav_attr} aria-label="Main">\n'
+                    f'{ind}  <ul class="{list_cls} l-row" role="list"{list_attrs}>\n'
                     f"{items}\n{ind}  </ul>\n{ind}</nav>"
                 )
             if stage_css is not None:
@@ -746,7 +850,7 @@ class Generator:
                 parts = parts + [stage_html]
                 attrs.append('data-fit=""')
             inner = "\n" + "\n".join(parts) + "\n" + ind
-            if e.kind == "container" and e.layout.get("page_container"):
+            if e.kind == "container" and e.layout.get("page_container") and not self._in_overlay:
                 for q, decls in self.frame_css.get(id(e), {}).items():
                     css[q] = dict(decls)
                 cls_extra = self.class_for("content", css) if any(main.values()) or len(css) > 1 else ""
@@ -756,6 +860,18 @@ class Generator:
                     klass += " l-row"
                 return f'{ind}<div class="{klass}"{a}>{inner}</div>'
 
+        if e.layout.get("mobile_only"):
+            main["display"] = "none"  # shown by the phone media query only
+        if e.hidden_base:
+            # Inside Auto Layout a hidden layer takes no space (Figma reflows when it appears); elsewhere
+            # its frame keeps its size, so the layer keeps its place and only becomes visible.
+            in_flow = self._auto[-1] and self._ctx[-1] not in ("absolute", "layer") and "position" not in placement
+            if e.node is not None:
+                self.display_of[e.node["id"]] = main.get("display") or ("block" if in_flow else "")
+            if in_flow:
+                main["display"] = "none"  # shown by its state (Auto Layout reflows like Figma)
+            else:
+                main.update({"opacity": "0", "visibility": "hidden"})
         bleed_done = placement.pop("__bleed_done__", None) if "__bleed_done__" in placement else None
         mobile = dict(placement.pop("__mobile__", None) or {})
         main.update(placement)
@@ -772,8 +888,12 @@ class Generator:
             main.update(self.mask_css(e))
         if e.kind in ("box", "shape"):
             self._extend_to_edge(e, main)
-        mobile.update(self.composition_mobile(e, main))
-        mobile.update(self.fluid(e, main))
+        phone_design = self.page.width <= MOBILE_MAX  # drawn for phones already (a phone page, a phone menu)
+        if not phone_design:
+            mobile.update(self.composition_mobile(e, main))
+            mobile.update(self.fluid(e, main))
+        else:
+            mobile = {}
         mobile.update(self.frame_css.get(id(e), {}).get(MOBILE_Q, {}))
         if mobile:
             css[MOBILE_Q] = mobile
@@ -790,9 +910,14 @@ class Generator:
         else:
             cls = self.class_for(role, css)
         utility = " l-row" if e.layout.get("mode") == "row" and "grid" not in main.get("display", "") else ""
-        if main.get("display") == "grid" and main.get("grid-template-columns", "").startswith("repeat("):
+        if phone_design:
+            utility = ""  # the inferred phone rules (rows stack) are for desktop designs only
+        elif main.get("display") == "grid" and main.get("grid-template-columns", "").startswith("repeat("):
             utility += f" l-grid-{main['grid-template-columns'][7:].split(',')[0]}"
         extra = ' class="' + cls + utility + '"'
+        if e.node is not None:
+            self.class_of.setdefault(e.node["id"], cls.split()[0])
+            self.tag_of.setdefault(e.node["id"], tag)
         a = (" " + " ".join(attrs)) if attrs else ""
         if tag in ("img", "input"):
             return f"{ind}<{tag}{extra}{a}>"
@@ -911,6 +1036,9 @@ class Generator:
                 e.tag = "nav"
                 for t in e.children:
                     t.tag, t.role = "a", "link"
+                    label = self.nav_label(t)
+                    if label is not None and label is not t:
+                        label.tag = "span"
                 if sec is page.sections[0] and sec.h <= 160 and sec.tag in (None, "section"):
                     sec.tag = "header"  # a thin top band holding the menu is the site header
                 elif (
@@ -921,7 +1049,7 @@ class Generator:
                     and parent.tag is None
                 ):
                     parent.tag = "header"
-            for c in e.children:
+            for c in e.layers + e.children:
                 visit(c, e, sec)
 
         for sec in page.sections[:2]:
@@ -929,6 +1057,7 @@ class Generator:
         for sec in page.sections:
             self.detect_forms(sec)
         self.heading_order(page)
+        self.resolve_links(page, used)
 
     @staticmethod
     def heading_order(page: Page) -> None:
@@ -956,14 +1085,35 @@ class Generator:
             prev = level
 
     @staticmethod
+    def _draws_box(e: El) -> bool:
+        n = e.node or {}
+        return bool(background(n.get("fills"), (e.w, e.h)) or border(n) or effects(n))
+
+    @staticmethod
+    def nav_label(c: El) -> El | None:
+        """The label of a menu item: a text, or a link component holding one text (plus, at most, an
+        underline or icon that only shows on hover)."""
+        if c.kind == "text":
+            return c
+        if c.kind != "box" or c.node is None or c.layers:
+            return None
+        texts = [t for t in c.children if t.kind == "text" and not t.hidden_base]
+        others = [x for x in c.children if x not in texts]
+        decorative = all(x.hidden_base or (x.kind in ("shape", "svg") and min(x.w, x.h) <= 4) for x in others)
+        return texts[0] if len(texts) == 1 and decorative else None
+
+    @staticmethod
     def is_nav(e: El) -> bool:
         """A row of 2–8 short one-line labels in the same style: a navigation menu."""
-        if e.kind != "wrapper" or e.layout.get("mode") != "row" or not 2 <= len(e.children) <= 8:
+        if e.kind not in ("wrapper", "box") or e.layout.get("mode") != "row" or not 2 <= len(e.children) <= 8:
             return False
-        if not all(c.kind == "text" for c in e.children):
+        if e.kind == "box" and e.node is None:
+            return False
+        labels = [Generator.nav_label(c) for c in e.children]
+        if not all(labels):
             return False
         sizes = set()
-        for c in e.children:
+        for c in labels:
             chars = c.node.get("characters", "").strip()
             if not chars or "\n" in chars or len(chars.split()) > 3 or len(chars) > 24:
                 return False
@@ -1131,7 +1281,9 @@ class Generator:
                 main_fill = cn.get("layoutSizingHorizontal" if row else "layoutSizingVertical") == "FILL"
                 cross_fill = cn.get("layoutSizingVertical" if row else "layoutSizingHorizontal") == "FILL"
                 if main_fill or cn.get("layoutGrow") == 1:
-                    cd.update({"flex": "1 1 0", "min-width": "0"} if row else {"flex": "1 1 auto"})
+                    # Basis = the designed width (not 0): with padding, a 0 basis would make padded
+                    # siblings wider than Figma's equal FILL widths.
+                    cd.update({"flex": f"1 1 {px(c.w)}", "min-width": "0"} if row else {"flex": "1 1 auto"})
                 if cross_fill or cn.get("layoutAlign") == "STRETCH":
                     cd["align-self"] = "stretch"
             per_child.append(cd)
@@ -1152,7 +1304,13 @@ class Generator:
         """
         ctx = self._ctx[-1]
         sizing = self._auto_sizing(e)
-        if sizing in ("HUG", "FILL") and e.kind in ("box", "wrapper") and ctx not in ("absolute", "layer"):
+        empty = e.kind == "box" and not e.children and not e.layers
+        if (
+            sizing in ("HUG", "FILL")
+            and e.kind in ("box", "wrapper")
+            and ctx not in ("absolute", "layer")
+            and not empty
+        ):
             return {}  # Auto Layout decides: hug its content, or fill (set by the parent's flex rules)
         if sizing == "FILL" and e.kind in ("image", "shape") and ctx == "column":
             return {"width": "100%"} if e.kind == "shape" else {
@@ -1176,6 +1334,26 @@ class Generator:
             if ctx == "grid":
                 return {"height": px(e.h)}
             return {"width": "100%", "max-width": px(e.w), "height": px(e.h)}
+        if e.kind == "box" and not e.children and not e.layers:
+            # An empty frame (an image fill, a coloured block): sized like an image, keeping its shape.
+            ratio = f"{round(e.w)} / {round(max(e.h, 1))}"
+            if fixed:
+                return {"width": px(e.w), "height": px(e.h)}
+            if sizing is not None:
+                # Inside Auto Layout: the frame's own sizing (fill / fixed) decides, as in Figma.
+                n = e.node or {}
+                d = {} if sizing == "FILL" else {"width": px(e.w), "max-width": "100%", "flex-shrink": "1"}
+                if n.get("layoutSizingVertical") == "FIXED":
+                    d["height"] = px(e.h)
+                elif n.get("layoutSizingVertical") != "FILL":
+                    d["aspect-ratio"] = ratio
+                return d
+            if sizing == "FILL" or ctx == "grid":
+                return {"aspect-ratio": ratio} if ctx != "row" else {"aspect-ratio": ratio, "min-width": "0"}
+            if ctx == "row":
+                return {"flex": f"0 1 {px(e.w)}", "width": "100%", "max-width": px(e.w), "min-width": "0",
+                        "aspect-ratio": ratio}  # fmt: skip
+            return {"width": "100%", "max-width": px(e.w), "aspect-ratio": ratio}
         if e.kind == "box":
             if e.layout.get("mode") == "absolute":
                 d = {"width": px(e.w), "max-width": "100%"}
@@ -1313,7 +1491,10 @@ class Generator:
         return heading or ""
 
     def link_for(self, e: El) -> str:
-        """Buttons and nav items whose label names a section link to it (single-page navigation)."""
+        """Prototype connections first; otherwise buttons and nav items whose label names a section link
+        to it (single-page navigation)."""
+        if e.link:
+            return e.link
         label = " ".join(t.node.get("characters", "") for t in _texts(e)) if e.kind != "text" else e.node.get(
             "characters", "")  # fmt: skip
         key = _norm(label)
@@ -1324,6 +1505,489 @@ class Generator:
         if contact and e.kind != "text" and CTA_WORDS.search(key):
             return contact  # "Get in touch", "I need help", "Book a call"… go to the contact section
         return "#"
+
+    # ------------------------------------------------------------------ prototype interactions
+    def resolve_links(self, page: Page, used_ids: set[str]) -> None:
+        """Prototype connections on click: other pages, sections, URLs, back, overlays."""
+        by_node: dict[str, El] = {}
+        for sec in page.sections:
+            for e in sec.walk():
+                if e.node is not None:
+                    by_node.setdefault(e.node["id"], e)
+            if sec.node is not None:
+                by_node.setdefault(sec.node["id"], sec)
+
+        def anchor(node_id: str) -> str | None:
+            target = by_node.get(node_id)
+            n = self.inter.nodes.get(node_id)
+            while target is None and n is not None and n.get("parentId"):
+                n = self.inter.nodes.get(n["parentId"])  # a layer inside something that was rendered
+                target = by_node.get(n["id"]) if n else None
+            if target is None:
+                return None
+            if not target.html_id:
+                base = slug(target.name or "section")
+                hid, k = base, 2
+                while hid in used_ids:
+                    hid, k = f"{base}-{k}", k + 1
+                used_ids.add(hid)
+                target.html_id = hid
+            return f"#{target.html_id}"
+
+        for sec in page.sections:
+            for e in sec.walk():
+                node = e.actions_node or e.node
+                act = self.inter.click_action(node)
+                if not act or e.kind in ("section", "container", "wrapper"):
+                    continue
+                kind = act["kind"]
+                if kind == "page":
+                    file = self.frame_files.get(act["frame"])
+                    if file:
+                        e.link = file
+                    else:
+                        name = self.inter.target_name(act["frame"])
+                        self.warnings.append(f"“{e.name}” links to “{name}”, which was not selected for conversion.")
+                        continue
+                elif kind == "scroll":
+                    href = anchor(act["node"])
+                    if not href:
+                        continue
+                    e.link = href
+                elif kind == "url":
+                    e.link = act["url"]
+                    if act.get("newTab"):
+                        e.link_attrs += ['target="_blank"', 'rel="noopener"']
+                elif kind == "back":
+                    e.link = "#"
+                    e.link_attrs.append('data-action="back"')
+                    self.js_features.add("back")
+                elif kind == "close":
+                    e.link = "#"
+                    e.link_attrs.append("data-close")
+                    self.js_features.add("overlay")
+                elif kind == "overlay":
+                    oid = act["overlay"]
+                    e.link = f"#overlay-{slug(oid, 'overlay')}"
+                    e.link_attrs += [f'data-open="overlay-{slug(oid, "overlay")}"', 'aria-haspopup="dialog"']
+                    self.overlay_uses.setdefault(oid, act)
+                    self._page_overlays.setdefault(oid, act)
+                    self.js_features.add("overlay")
+                else:
+                    continue
+                if e.tag in ("a", "button", "input", "textarea", "nav"):
+                    continue
+                if e.kind == "text":
+                    e.tag = "a"
+                elif e.kind in ("box", "image", "svg", "raster", "shape"):
+                    has_link = any(x is not e and x.tag in ("a", "button") for x in e.walk())
+                    if e.kind == "box" and not has_link:
+                        e.tag = "a"  # the whole card is the link
+                        for t in _texts(e):
+                            if t.tag in (None, "a"):
+                                t.tag = t.tag if t.tag and t.tag != "a" else None
+                    else:
+                        if kind not in ("close", "overlay", "back"):
+                            e.link_attrs.append(f'data-href="{html.escape(e.link)}"')
+                            self.js_features.add("href")
+                        if e.kind != "box":
+                            e.link_attrs += ['role="button"', 'tabindex="0"']
+                            self.js_features.add("href")
+
+    def mark_fixed(self, page: Page) -> None:
+        """Layers fixed when scrolling (the frame's fixed children, or scrollBehavior FIXED / STICKY):
+        a fixed band at the top of the page becomes a sticky header."""
+        root = page.root.node or {}
+        kids = root.get("children") or []
+        n_fixed = int(root.get("numberOfFixedChildren") or 0)
+        fixed = set(kids[len(kids) - n_fixed :]) if n_fixed else set()
+        fixed |= {n["id"] for n in self.inter.nodes.values() if n.get("scrollBehavior") in ("FIXED", "STICKY_SCROLLS")}
+        if not fixed:
+            return
+        for sec in page.sections[:2]:
+            ids = {sec.node["id"]} if sec.node else set()
+            ids |= {c.node["id"] for c in sec.walk() if c.node is not None}
+            if ids & fixed and sec.y <= 8 and sec.h <= 200:
+                sec.layout["sticky"] = True
+
+    def derive_frame(self, page: Page, fpage: Page, role: str) -> tuple:
+        """Matches a page with its mobile / tablet frame and derives the media-query CSS (once)."""
+        key = (id(page), role)
+        if key not in self._frame_derived:
+            mt = bp.match(page, fpage, self.asset_hashes)
+            derived = bp.derive_css(page, fpage, mt)
+            self._frame_derived[key] = (mt, derived)
+            for sec in page.sections:
+                if not sec.component or role in self._component_frame_css.get(sec.component, {}):
+                    continue
+                els = list(sec.walk())
+                by_index = {i: dict(derived[id(el)]) for i, el in enumerate(els) if id(el) in derived}
+                if by_index:
+                    self._component_frame_css.setdefault(sec.component, {})[role] = (len(els), by_index)
+        return self._frame_derived[key]
+
+    def find_phone_menu(self, page: Page, mobile: Page) -> None:
+        """A menu icon that exists only in the mobile frame and opens an overlay (or is named Menu) is
+        remembered for the site header: every page sharing that header gets the phone menu button."""
+        if not page.sections:
+            return
+        mt, _ = self.derive_frame(page, mobile, "mobile")
+        for m in mt.mobile_only:
+            act = self.inter.click_action(m.actions_node or m.node)
+            named = re.search(r"\b(menu|hamburger|burger|nav(igation)?)\b", m.name or "", re.I)
+            if m.kind not in ("svg", "raster", "image", "box") or max(m.w, m.h) > 64:
+                continue
+            if not ((act and act["kind"] == "overlay") or named):
+                continue
+            msec = next((s_ for s_ in mobile.sections if any(x is m for x in s_.walk())), None)
+            if msec is None or msec is not mobile.sections[0]:
+                continue
+            key = page.sections[0].component or f"page:{id(page)}"
+            self._phone_menus.setdefault(key, (m, msec, mobile.width, act))
+            return
+
+    def phone_menu(self, page: Page, mobile_only: list[El]) -> list[El]:
+        """Adds the phone menu button to this page's header (shown below 768px only)."""
+        if not page.sections:
+            return mobile_only
+        header = page.sections[0]
+        entry = self._phone_menus.get(header.component or f"page:{id(page)}")
+        if entry is None:
+            return mobile_only
+        m, msec, mobile_width, act = entry
+        btn = El(m.id, m.name or "Menu", m.kind, 0, header.y, m.w, m.h, node=m.node, asset=m.asset)
+        btn.layout["mobile_only"] = True
+        if act and act["kind"] == "overlay":
+            oid = act["overlay"]
+            btn.link = f"#overlay-{slug(oid, 'overlay')}"
+            btn.link_attrs += [f'data-open="overlay-{slug(oid, "overlay")}"', 'aria-haspopup="dialog"',
+                               'role="button"', 'tabindex="0"']  # fmt: skip
+            self._page_overlays.setdefault(oid, act)
+            self.js_features.add("overlay")
+        header.layers.append(btn)
+        self.frame_css.setdefault(id(btn), {})[MOBILE_Q] = {
+            "display": "block",
+            "width": px(m.w),
+            "height": px(m.h),
+            "left": "auto",
+            "right": px(mobile_width - m.right),
+            "top": px(m.y - msec.y),
+            "z-index": "2",
+        }
+        return [x for x in mobile_only if x is not m]
+
+    def auto_menu(self, page: Page) -> None:
+        """No mobile frame: a menu too wide for a phone gets a menu button that opens it as a panel."""
+        for sec in page.sections[:1]:
+            for e in sec.walk():
+                if e.tag != "nav" or not e.children:
+                    continue
+                labels = sum(c.w for c in e.children) + max(0, len(e.children) - 1) * 24
+                if labels <= MOBILE_MAX - 2 * 16 - 140:
+                    return
+                e.layout["auto_menu"] = True
+                self.js_features.add("nav")
+                return
+
+    def page_dialogs(self, page: Page) -> str:
+        """Overlays opened from this page, as <dialog> elements at the end of <body>."""
+        done: set[str] = set()
+        parts: list[str] = []
+        queue = list(self._page_overlays.items())
+        while queue:
+            oid, act = queue.pop(0)
+            if oid in done:
+                continue
+            done.add(oid)
+            before = dict(self._page_overlays)
+            parts.append(self.overlay_html(oid, act, page))
+            queue += [(k, v) for k, v in self._page_overlays.items() if k not in before]
+        self.page = page
+        return "".join(parts)
+
+    def overlay_html(self, oid: str, act: dict, opener: Page) -> str:
+        root = self.inter.nodes.get(oid)
+        if root is None:
+            self.warnings.append(f"An overlay ({self.inter.target_name(oid)}) was not included in the bundle.")
+            return ""
+        settings = self.inter.overlays.get(oid) or {}
+        if oid not in self._overlay_pages:
+            frame = {"role": "overlay", "rootId": oid, "name": root["name"], "page": root["name"],
+                     "width": root.get("width", 400), "height": root.get("height", 300)}  # fmt: skip
+            opage = layout_page(IRBuilder(self.bundle).build_page(frame))
+            apply_container(opage, (0, opage.width))
+            self._overlay_pages[oid] = opage
+        opage = self._overlay_pages[oid]
+        saved = (self.page, self.expect, self._anchors, self.section_slug, self._stack, self._bg, self._levels)
+        self.page, self.expect = opage, []
+        self._in_overlay += 1
+        self._hidden += 1  # not part of the page's default look: nothing to measure
+        try:
+            self.assign_roles()
+            self.semantics(opage)
+            for t in (t for s_ in opage.sections for t in _texts(s_)):
+                if t.tag == "h1":
+                    t.tag = "h2"  # the page keeps its one h1
+            for sec in opage.sections:
+                if sec.html_id and not sec.html_id.startswith(slug(root["name"], "overlay")):
+                    sec.html_id = f"{slug(root['name'], 'overlay')}-{sec.html_id}"  # ids stay unique on the page
+            self._stack, self._bg, self._levels = set(), set(), {}
+            for sec in opage.sections:
+                need, bg, levels = self.stacking_info(sec)
+                self._stack |= need
+                self._bg |= bg
+                self._levels.update(levels)
+            inner = []
+            for sec in opage.sections:
+                self.section_slug = slug(root["name"], "overlay")
+                inner.append(self.render(sec, {}, 2))
+        finally:
+            self._hidden -= 1
+            self._in_overlay -= 1
+            self.page, self.expect, self._anchors, self.section_slug, self._stack, self._bg, self._levels = saved
+        oslug = slug(root["name"], "overlay")
+        w, h = float(root.get("width") or 400), float(root.get("height") or 300)
+        # As wide as one of the design's screens (a phone menu drawn at 390px): it covers the screen.
+        full = any(
+            abs(w - float(f.get("width") or 0)) <= float(f.get("width") or 0) * 0.05 for f in self.bundle["frames"]
+        )
+        d = {"padding": "0", "border": "0", "color": "inherit", "overflow": "auto"}
+        d.update(background(root.get("fills"), (w, h)))
+        d.update(radius(root))
+        d.update(effects(root))
+        pos = settings.get("positionType") or "CENTER"
+        if full:
+            d.update({"width": "100%", "max-width": "none", "height": "100dvh", "max-height": "none", "margin": "0"})
+        else:
+            d.update({"width": px(w), "max-width": "calc(100% - 32px)"})
+            v, _, hz = pos.partition("_")
+            if pos != "CENTER" and pos != "MANUAL":
+                d["margin"] = " ".join([
+                    "0" if v == "TOP" else "auto",
+                    "0" if hz == "RIGHT" else "auto",
+                    "0" if v == "BOTTOM" else "auto",
+                    "0" if hz == "LEFT" else "auto",
+                ])  # fmt: skip
+        cls = self.class_for("overlay", {"": d}, component=f"overlay-{oslug}")
+        bg = settings.get("background") or {}
+        backdrop = "transparent"
+        if bg.get("type") == "SOLID_COLOR" and bg.get("color"):
+            c = bg["color"]
+            backdrop = (
+                f"rgba({round(c['r'] * 255)}, {round(c['g'] * 255)}, {round(c['b'] * 255)}, {ix._num(c.get('a', 1))})"
+            )
+        tr = act.get("transition") or {}
+        duration, fn = ix.timing(tr) if tr else (0.2, "ease-out")
+        frames_css = {
+            "LEFT": "translateX(100%)", "RIGHT": "translateX(-100%)", "TOP": "translateY(100%)",
+            "BOTTOM": "translateY(-100%)",
+        }  # fmt: skip
+        start = frames_css.get(tr.get("direction"), "") if tr.get("type") in ("MOVE_IN", "SLIDE_IN", "PUSH") else ""
+        anim = f"f2c-{cls}"
+        self.overlay_css[cls] = (
+            f".{cls}::backdrop {{ background: {backdrop}; }}\n"
+            f"@keyframes {anim} {{ from {{ opacity: {0 if not start else 1}; transform: {start or 'none'}; }} }}\n"
+            f"@media (prefers-reduced-motion: no-preference) {{\n"
+            f"  .{cls}[open] {{ animation: {anim} {ix._num(duration)}s {fn}; }}\n}}"
+        )
+        attrs = [f'id="overlay-{slug(oid, "overlay")}"', f'class="{cls}"', f'aria-label="{html.escape(root["name"])}"']
+        if settings.get("closeOnOutside"):
+            attrs.append("data-close-outside")
+        return f"  <dialog {' '.join(attrs)}>\n" + "\n".join(inner) + "\n  </dialog>\n"
+
+    APPEAR = {"fade": "none", "fade-up": "translateY(24px)", "fade-down": "translateY(-24px)",
+              "slide-left": "translateX(32px)", "slide-right": "translateX(-32px)", "zoom": "scale(0.94)"}  # fmt: skip
+
+    def motion_attrs(self, e: El) -> list[str]:
+        """Scroll-in animation set on the layer in the plugin (Motion), or for the whole site."""
+        motion = (e.node or {}).get("motion") or {}
+        preset = motion.get("appear")
+        if preset not in self.APPEAR:
+            return []
+        self.js_features.add("animate")
+        out = [f'data-animate="{preset}"']
+        style = []
+        if motion.get("duration"):
+            style.append(f"--f2c-duration: {ix._num(float(motion['duration']))}s")
+        if motion.get("delay"):
+            style.append(f"--f2c-delay: {ix._num(float(motion['delay']))}s")
+        if style:
+            out.append(f'style="{"; ".join(style)}"')
+        return out
+
+    def motion_css(self) -> str:
+        if "animate" not in self.js_features:
+            return ""
+        lines = [
+            "/* Scroll-in animations (Motion in the plugin): only with JavaScript and without reduced motion */",
+            "@media (prefers-reduced-motion: no-preference) {",
+            "  .js [data-animate] { opacity: 0; transition: opacity var(--f2c-duration, 0.6s) ease-out"
+            " var(--f2c-delay, 0s),"
+            " transform var(--f2c-duration, 0.6s) ease-out var(--f2c-delay, 0s); }",
+        ]
+        for name, start in self.APPEAR.items():
+            if start != "none":
+                lines.append(f'  .js [data-animate="{name}"] {{ transform: {start}; }}')
+        lines += ["  .js [data-animate].is-in { opacity: 1; transform: none; }", "}"]
+        return "\n".join(lines)
+
+    def page_transition_css(self) -> str:
+        """Figma "Navigate to" transitions between pages: cross-document view transitions (the shared
+        header stays in place with Smart Animate; Move in / Push / Slide in slide the new page in)."""
+        trs = self.inter.navigate_transitions()
+        if not trs or len(self.frame_files) < 2:
+            return ""
+        tr = Counter(json.dumps(t, sort_keys=True) for t in trs).most_common(1)[0][0]
+        tr = json.loads(tr)
+        duration, fn = ix.timing(tr)
+        start = {"LEFT": "translateX(100%)", "RIGHT": "translateX(-100%)", "TOP": "translateY(100%)",
+                 "BOTTOM": "translateY(-100%)"}.get(tr.get("direction"), "")  # fmt: skip
+        lines = ["/* Page transitions from the prototype (browsers without view transitions just navigate) */",
+                 "@media (prefers-reduced-motion: no-preference) {", "  @view-transition { navigation: auto; }",
+                 f"  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) {{ "
+                 f"animation-duration: {ix._num(duration)}s; animation-timing-function: {fn}; }}"]  # fmt: skip
+        if tr.get("type") in ("MOVE_IN", "PUSH", "SLIDE_IN") and start:
+            lines.append(f"  @keyframes f2c-page-in {{ from {{ transform: {start}; }} }}")
+            lines.append("  ::view-transition-new(root) { animation-name: f2c-page-in; }")
+        if tr.get("type") == "SMART_ANIMATE" and self.components:
+            for name in sorted(self.components):
+                if name in ("site-header", "site-footer"):
+                    lines.append(f"  .{name} {{ view-transition-name: {name}; }}")
+        lines.append("}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _reveals(states: list[dict]) -> bool:
+        """A click state that shows layers (an accordion) is aria-expanded; otherwise aria-pressed."""
+        return any(c.get("show") for st in states if st["state"]["trigger"] == "click" for c in st["changes"].values())
+
+    def state_attrs(self, e: El, tag: str) -> list[str]:
+        """Attributes for elements with click toggles or auto-advancing states."""
+        if e.node is None:
+            return []
+        states = self.inter.changes.get(e.node["id"]) or []
+        triggers = {st["state"]["trigger"] for st in states}
+        out: list[str] = []
+        if "click" in triggers:
+            reveals = self._reveals(states)
+            out.append("data-toggle")
+            if tag not in ("a", "button"):
+                out += ['role="button"', 'tabindex="0"']
+            out.append('aria-expanded="false"' if reveals else 'aria-pressed="false"')
+            self.js_features.add("toggle")
+        if "timeout" in triggers:
+            chain = sorted((st["state"] for st in states if st["state"]["trigger"] == "timeout"),
+                           key=lambda x: x.get("order", 0))  # fmt: skip
+            delays = [round(float(x.get("timeout") or 0) * 1000) for x in chain]
+            out += ['data-autoplay', f'data-steps="{len(chain)}"', f'data-delays="{",".join(map(str, delays))}"',
+                    'data-step="0"']  # fmt: skip
+            self.js_features.add("autoplay")
+        return out
+
+    def interaction_css(self) -> str:
+        """Hover / press / focus / toggle / auto-play states as CSS, from the design's variants."""
+        if not self.inter.changes:
+            return ""
+        nodes = self.inter.nodes
+        hover_rules: dict[str, dict[str, str]] = {}
+        rules: dict[str, dict[str, str]] = {}
+        transitions: dict[str, dict[str, str]] = {}  # class -> {prop: timing}
+
+        def rendered_ancestor(nid: str, inst_id: str, changes: dict) -> str | None:
+            n = nodes.get(nid)
+            while n is not None and n["id"] != inst_id:
+                n = nodes.get(n.get("parentId") or "")
+                if n is not None and n["id"] in self.class_of and n["id"] in changes and changes[n["id"]].get("box"):
+                    return n["id"]
+            return None
+
+        for inst_id, states in self.inter.changes.items():
+            s_cls = self.class_of.get(inst_id)
+            if not s_cls:
+                continue
+            focusable = self.tag_of.get(inst_id) in ("a", "button")
+            for entry in states:
+                st, changes = entry["state"], entry["changes"]
+                trig = st["trigger"]
+                if trig == "hover":
+                    states_sel = [":hover"]
+                    target = hover_rules
+                    extra = [":focus-visible"] if focusable else []
+                elif trig == "press":
+                    states_sel, target, extra = [":active"], rules, []
+                elif trig == "focus":
+                    states_sel, target, extra = [":focus-visible"], rules, []
+                elif trig == "click":
+                    attr = "aria-expanded" if self._reveals(states) else "aria-pressed"
+                    states_sel, target, extra = [f'[{attr}="true"]'], rules, []
+                else:  # timeout chain step
+                    states_sel, target, extra = [f'[data-step="{st.get("order", 1)}"]'], rules, []
+                timing = st.get("transition") if st.get("wired") else None
+                for nid, ch in changes.items():
+                    d_cls = self.class_of.get(nid)
+                    if not d_cls:
+                        continue
+                    decls = dict(ch.get("css") or {})
+                    if ch.get("box"):
+                        dcx, dcy, scx, scy, rot, _t = ch["box"]
+                        anc = rendered_ancestor(nid, inst_id, changes) if nid != inst_id else None
+                        if anc:
+                            pdx, pdy, psx, psy, _pr, _pt = changes[anc]["box"]
+                            pc = changes[anc].get("center") or (0, 0)
+                            cc = ch.get("center") or (0, 0)
+                            dcx -= pdx + (psx - 1) * (cc[0] - pc[0])
+                            dcy -= pdy + (psy - 1) * (cc[1] - pc[1])
+                            scx, scy = scx / (psx or 1), scy / (psy or 1)
+                        tf = ix.transform_css(dcx, dcy, scx, scy, rot)
+                        if tf != "none":
+                            decls["transform"] = tf
+                    if ch.get("show") is True:
+                        disp = self.display_of.get(nid)
+                        if disp:
+                            decls["display"] = disp
+                        else:
+                            decls.update({"opacity": "1", "visibility": "visible"})
+                    elif ch.get("show") is False:
+                        decls.update({"opacity": "0", "visibility": "hidden"})
+                    if not decls:
+                        continue
+                    props = [k for k in decls if k != "display"]
+                    if props:
+                        # Entering the state uses its own timing; leaving it, the base timing (below).
+                        decls["transition"] = ix.transition_value(props, timing)
+                        tr = transitions.setdefault(d_cls, {})
+                        for k in props:
+                            if trig == "hover" or k not in tr:
+                                tr[k] = ix.transition_value([k], timing)
+                    for sel_state in states_sel + extra:
+                        sel = f".{s_cls}{sel_state}" + ("" if nid == inst_id else f" .{d_cls}")
+                        target.setdefault(sel, {}).update(decls)
+                if trig in ("hover", "press", "click"):
+                    self.rules.setdefault(s_cls, {"": {}})[""].setdefault("cursor", "pointer")
+        for cls, props in transitions.items():
+            base = self.rules.setdefault(cls, {"": {}}).setdefault("", {})
+            base["transition"] = ", ".join(props.values())
+
+        def block(rs: dict[str, dict[str, str]], indent: str = "") -> str:
+            return "\n".join(
+                f"{indent}{sel} {{ " + " ".join(f"{k}: {v};" for k, v in decls.items()) + " }"
+                for sel, decls in rs.items()
+            )
+
+        out = ["/* Interactions: states from the design's variants (hover, press, focus, toggles, auto-play) */"]
+        if hover_rules:
+            plain = {k: v for k, v in hover_rules.items() if ":focus-visible" in k}
+            hover = {k: v for k, v in hover_rules.items() if ":focus-visible" not in k}
+            if hover:
+                out.append("@media (hover: hover) {\n" + block(hover, "  ") + "\n}")
+            if plain:
+                out.append(block(plain))
+        if rules:
+            out.append(block(rules))
+        if transitions:
+            moving = ", ".join(f".{c}" for c in sorted(transitions))
+            out.append(f"@media (prefers-reduced-motion: reduce) {{\n  {moving} {{ transition: none; }}\n}}")
+        return "\n".join(out)
 
     @staticmethod
     def stacking(sec: El) -> set[int]:
@@ -1679,6 +2343,8 @@ class Generator:
                 body = "\n".join(f"  {k}: {v};" for k, v in decls.items())
                 blocks.append(f".{cls}{suffix} {{\n{body}\n}}")
         text = "\n\n".join(blocks)
+        if getattr(self, "_interaction_text", ""):
+            text += "\n\n" + self._interaction_text
         # Per-element responsive rules, widest breakpoint first (narrower ones win).
         order = sorted(media, key=lambda q: -_query_width(q))
         media_text = "\n\n".join(f"{q} {{\n" + "\n".join(media[q]) + "\n}" for q in order)
@@ -1754,9 +2420,11 @@ class Generator:
         """
         self.page = page
         self.expect = []
+        self._page_overlays = {}
         self.warnings.extend(w for w in page.warnings if w not in self.warnings)
         self.assign_roles()
         self.semantics(page)
+        self.mark_fixed(page)
         if self.body_style is None:
             self.body_style = self.base_text_style(page)
         if page.container:
@@ -1765,18 +2433,37 @@ class Generator:
         matches = {}
         for role, fpage in (frames or {}).items():
             query = MOBILE_Q if role == "mobile" else TABLET_Q
-            mt = bp.match(page, fpage, self.asset_hashes)
+            mt, derived = self._frame_derived.get((id(page), role)) or self.derive_frame(page, fpage, role)
             matches[role] = mt
-            for eid, decls in bp.derive_css(page, fpage, mt).items():
+            for eid, decls in derived.items():
                 if eid == bp.ROOT_KEY:
                     self.root_media.setdefault(query, {}).update(decls)
                     continue
                 self.frame_css.setdefault(eid, {}).setdefault(query, {}).update(decls)
+            if role == "mobile":
+                mt.mobile_only = self.phone_menu(page, mt.mobile_only)
             if mt.mobile_only:
                 self.assumptions.append(
                     f"{page.name}: {len(mt.mobile_only)} layers exist only in the {role} frame "
                     "and are not generated yet."
                 )
+        # Shared sections (header, footer…) behave the same on every page: a page without its own
+        # mobile / tablet frame reuses what another page's frame says about the shared section.
+        for sec in page.sections:
+            for role, by_index in self._component_frame_css.get(sec.component or "", {}).items():
+                if role in (frames or {}):
+                    continue
+                query = MOBILE_Q if role == "mobile" else TABLET_Q
+                els = list(sec.walk())
+                if len(els) != by_index[0]:
+                    continue
+                for idx, decls in by_index[1].items():
+                    self.frame_css.setdefault(id(els[idx]), {}).setdefault(query, {}).update(decls)
+        if "mobile" not in (frames or {}):
+            if page.sections and (page.sections[0].component or f"page:{id(page)}") in self._phone_menus:
+                self.phone_menu(page, [])  # the shared header has a designed phone menu
+            else:
+                self.auto_menu(page)
         body_parts = []
         prev_bottom = 0.0
         self._stack = set()
@@ -1802,6 +2489,7 @@ class Generator:
             (role, fpage, bp.expectations(self.expect, page, fpage, matches[role]))
             for role, fpage in (frames or {}).items()
         ]
+        dialogs = self.page_dialogs(page)
         # Landmarks: a leading <header> and a trailing <footer> sit outside <main>.
         lead = 1 if len(body_parts) > 1 and body_parts[0].lstrip().startswith("<header") else 0
         tail = 1 if len(body_parts) > lead + 1 and body_parts[-1].lstrip().startswith("<footer") else 0
@@ -1811,6 +2499,7 @@ class Generator:
             "frame": page.frame,
             "title": page.root.name,
             "body": "\n".join(body_parts),
+            "dialogs": dialogs,
             "parts": (
                 body_parts[:lead],
                 body_parts[lead : len(body_parts) - tail],
@@ -1859,6 +2548,10 @@ class Generator:
 
     def finish(self, out_dir: Path, pages: list[dict]) -> Output:
         head = [("body", dict(self.body_style or {}))]
+        # Before css_text: state rules add transitions to classes.
+        extra = [self.interaction_css(), *self.overlay_css.values(), self.menu_css, self.motion_css(),
+                 self.page_transition_css()]  # fmt: skip
+        self._interaction_text = "\n".join(x for x in extra if x)
         root_css, rules_css = self.css_text(head)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "css").mkdir(exist_ok=True)
@@ -1878,7 +2571,8 @@ class Generator:
             "nav ul { list-style: none; margin: 0; padding: 0; }\n"
             "nav a { text-decoration: none; }\n"
             "body > header, main, body > footer { overflow-x: clip; }\n"
-            "[id] { scroll-margin-top: 24px; }\n\n"
+            "[id] { scroll-margin-top: 24px; }\n"
+            "@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }\n\n"
             "/* Layout */\n"
             ".container { width: min(100% - 2 * var(--gutter), var(--container)); margin-inline: auto; }"
         )
@@ -1901,7 +2595,7 @@ class Generator:
             + (f"  {mobile} {{ grid-template-columns: 1fr; row-gap: 24px; }}\n" if mobile else "")
             + "}"
         )
-        if not any(f["role"] == "mobile" for f in self.bundle["frames"]):
+        if not any(f["role"] == "mobile" for f in self.bundle["frames"]) and self.design_width > MOBILE_MAX:
             self.assumptions.append("No mobile frame: a simple stacked mobile layout was inferred below 768px.")
         fit = self.fit_css(pages[0]["width"] if pages else 1440) if self._fit_sections else ""
         frames = (
@@ -1915,6 +2609,13 @@ class Generator:
         corrections = out_dir / "css" / "corrections.css"
         if not corrections.exists():
             corrections.write_text("/* Fidelity corrections are written here after measuring the page. */\n")
+        scripts = ""
+        if self.js_features:
+            (out_dir / "js").mkdir(exist_ok=True)
+            (out_dir / "js" / "site.js").write_text(ix.SITE_JS, encoding="utf-8")
+            if "animate" in self.js_features:
+                scripts += "  <script>document.documentElement.classList.add('js')</script>\n"
+            scripts += '  <script src="js/site.js" defer></script>\n'
         docs = []
         for p in pages:
             bg = f' style="background: {p["background"]}"' if p["background"] != page_bg else ""
@@ -1924,7 +2625,7 @@ class Generator:
                 f"  <title>{html.escape(p['name'])} · {site}</title>\n{font_link}"
                 '  <link rel="stylesheet" href="css/styles.css">\n'
                 '  <link rel="stylesheet" href="css/corrections.css">\n'
-                f"</head>\n<body{bg}>\n{landmarks(p)}</body>\n</html>\n"
+                f"{scripts}</head>\n<body{bg}>\n{landmarks(p)}{p.get('dialogs', '')}</body>\n</html>\n"
             )
             (out_dir / p["file"]).write_text(doc, encoding="utf-8")
             docs.append(doc)
@@ -1978,13 +2679,23 @@ def generate_site(
     gen = Generator(None, bundle, asset_dir, font_dir)
     gen.asset_hashes = asset_hashes or {}
     gen.page_links = {_norm(page.name): filename for page, filename in pages}
+    gen.frame_files = {page.frame.get("rootId"): filename for page, filename in pages}
+    for filename, others in (frames or {}).items():
+        for other in others.values():
+            gen.frame_files.setdefault(other.frame.get("rootId"), filename)
     if len(pages) > 1:
         gen.page_links.update({"home": pages[0][1]})
+    for page, filename in pages:
+        for role, fpage in (frames or {}).get(filename, {}).items():
+            gen.derive_frame(page, fpage, role)
+        mobile = (frames or {}).get(filename, {}).get("mobile")
+        if mobile is not None:
+            gen.find_phone_menu(page, mobile)
     results = [gen.add_page(page, filename, (frames or {}).get(filename)) for page, filename in pages]
     out = gen.finish(out_dir, results)
     out.frame_checks = gen.frame_checks
     meta = {
-        "pages": [{k: v for k, v in r.items() if k not in ("body", "parts")} for r in results],
+        "pages": [{k: v for k, v in r.items() if k not in ("body", "parts", "dialogs")} for r in results],
         "components": out.components,
         "fonts": out.fonts,
         "assumptions": out.assumptions,

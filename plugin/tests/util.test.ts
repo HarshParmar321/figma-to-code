@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  assetIdFor, collectVariableAliasIds, detectImageFormat, isIconCandidate, suggestRole, validateRoles,
-  vectorGroupExport, maskGroupExport, RASTER_THRESHOLD, pageName,
-} from '../src/util.ts';
+import { assetIdFor, collectVariableAliasIds, detectImageFormat, isIconCandidate, suggestRole, validateRoles, vectorGroupExport, maskGroupExport, RASTER_THRESHOLD, pageName, stateSiblings, stateOfValue, triggerKind, reactionActions } from '../src/util.ts';
 
 test('suggestRole by frame width', () => {
   assert.equal(suggestRole(1440), 'desktop');
@@ -46,7 +43,7 @@ test('isIconCandidate', () => {
 
 test('validateRoles allows several pages', () => {
   assert.equal(validateRoles({}), 'Select at least one frame.');
-  assert.match(validateRoles({ a: 'mobile' }) ?? '', /at least one frame as Desktop/);
+  assert.equal(validateRoles({ a: 'mobile' }), null, 'a phone-only design: the mobile frame is the page');
   assert.equal(validateRoles({ a: 'desktop', b: 'desktop' }), null, 'two pages');
   assert.equal(validateRoles({ a: 'desktop', b: 'mobile' }), null);
 });
@@ -75,4 +72,31 @@ test('maskGroupExport flattens mask groups unless they hold text', () => {
   assert.equal(maskGroupExport('GROUP', true, true), null); // text stays live; the Engine masks with CSS
   assert.equal(maskGroupExport('GROUP', false, false), null);
   assert.equal(maskGroupExport('TEXT', true, false), null);
+});
+
+test('state variants next to the default one are found, wired or not', () => {
+  const base = { State: 'Default', Size: 'Large' };
+  const siblings = [
+    { State: 'Default', Size: 'Small' },
+    { State: 'Hover', Size: 'Large' },
+    { State: 'Pressed', Size: 'Large' },
+    { State: 'Hover', Size: 'Small' },
+    { State: 'Focused', Size: 'Large' },
+    { State: 'Disabled', Size: 'Large' },
+  ];
+  assert.deepEqual(stateSiblings(base, siblings), [[1, 'hover'], [2, 'press'], [4, 'focus']]);
+  assert.deepEqual(stateSiblings({ State: 'Hover' }, [{ State: 'Default' }]), []); // a state is not a base
+  assert.equal(stateOfValue('on hover'), 'hover');
+  assert.equal(stateOfValue('Primary'), null);
+});
+
+test('prototype triggers map to web events', () => {
+  assert.equal(triggerKind({ type: 'ON_HOVER' }), 'hover');
+  assert.equal(triggerKind({ type: 'ON_PRESS' }), 'press');
+  assert.equal(triggerKind({ type: 'ON_CLICK' }), 'click');
+  assert.equal(triggerKind({ type: 'AFTER_TIMEOUT' }), 'timeout');
+  assert.equal(triggerKind({ type: 'MOUSE_ENTER' }), 'enter');
+  assert.equal(triggerKind(null), 'other');
+  assert.deepEqual(reactionActions({ action: { type: 'BACK' } }), [{ type: 'BACK' }]);
+  assert.deepEqual(reactionActions({ actions: [{ type: 'URL', url: 'x' }] }), [{ type: 'URL', url: 'x' }]);
 });

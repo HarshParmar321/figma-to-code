@@ -58,18 +58,33 @@
   .font-row input { flex: 1; border: none; padding: 0; }
   .score.small b { font-size: 22px; }
   .download { display: grid; gap: 6px; margin: 6px 0 8px; }
-  .download label { display: flex; gap: 6px; align-items: baseline; }
+  .download label { display: flex; gap: 8px; align-items: baseline; justify-content: flex-start; text-align: left; cursor: pointer; }
+  .download input { width: auto; flex: none; margin: 0; }
   .download .note { margin: 0; }
   .frames-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
   button.link { flex: none; background: none; border: 0; padding: 0; width: auto; color: var(--figma-color-text-brand, #0d99ff); cursor: pointer; font: inherit; font-size: 11px; }
   button.link:hover { text-decoration: underline; }
+  .frames-head .links { display: flex; gap: 10px; }
+  .motion { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .motion label { display: flex; gap: 4px; align-items: center; }
+  .motion input { width: 56px; }
+  .picker { border: 1px solid var(--figma-color-border, #e5e5e5); border-radius: 6px; padding: 8px; margin-bottom: 8px; max-height: 300px; overflow: auto; }
+  .picker h3 { font-size: 11px; margin: 8px 0 4px; }
+  .picker h3:first-child { margin-top: 0; }
+  .picker label { display: flex; gap: 6px; align-items: center; padding: 2px 0; }
+  .picker label .size { margin-left: auto; color: var(--figma-color-text-secondary, #666); font-variant-numeric: tabular-nums; }
+  .picker .row { position: sticky; bottom: -8px; background: var(--figma-color-bg, #fff); padding: 6px 0 2px; margin-top: 6px; }
 </style>
 </head>
 <body>
   <h1>Figma to Code</h1>
-  <p class="hint">Select one desktop frame per page (Home, About…) and their mobile frames if you have them, then convert. Keep all frames on the same Figma page.</p>
+  <p class="hint">Select one desktop frame per page (Home, About…) and their mobile frames if you have them, then convert. Frames can come from any Figma page: use “Pick from all pages”.</p>
 
-  <div class="frames-head"><h2>Selected frames</h2><button id="select-all" class="link" title="Selects every top-level frame on this Figma page (frames inside sections too)">Select all frames on this page</button></div>
+  <div class="frames-head"><h2>Selected frames</h2>
+    <span class="links"><button id="select-all" class="link" title="Selects every top-level frame on this Figma page (frames inside sections too)">All on this page</button>
+    <button id="pick-pages" class="link" title="Choose frames from any page of the file">Pick from all pages…</button></span></div>
+  <div id="picker" class="picker" hidden></div>
+  <div id="picked-note" class="hint" hidden></div>
   <div id="frames"><div class="empty">Select one or more frames on the canvas.</div></div>
   <div id="ignored" class="hint"></div>
 
@@ -85,6 +100,18 @@
 
   <details>
     <summary>Settings and advanced</summary>
+    <h2>Motion: scroll-in animation</h2>
+    <p class="hint">Select layers on the canvas (a heading, cards, an image), pick how they appear when scrolled into view, then Apply. Figma itself has no scroll animations; this is stored on the layers and used by the conversion.</p>
+    <div class="motion">
+      <select id="motion-appear">
+        <option value="fade-up">Fade up</option><option value="fade">Fade in</option><option value="fade-down">Fade down</option>
+        <option value="slide-left">Slide from right</option><option value="slide-right">Slide from left</option>
+        <option value="zoom">Zoom in</option><option value="none">None (remove)</option>
+      </select>
+      <label>Duration <input id="motion-duration" type="number" min="0.1" max="3" step="0.1" value="0.6"> s</label>
+      <label>Delay <input id="motion-delay" type="number" min="0" max="3" step="0.1" value="0"> s</label>
+    </div>
+    <div class="row"><button id="motion-apply" class="secondary">Apply to selected layers</button></div>
     <h2>Engine URL</h2>
     <input id="engine" value="http://localhost:8000" spellcheck="false" />
     <div class="row">

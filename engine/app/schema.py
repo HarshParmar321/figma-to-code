@@ -44,7 +44,5 @@ def _integrity_errors(bundle: dict) -> list[str]:
     asset_ids = [a["id"] for a in bundle["assets"]]
     if len(asset_ids) != len(set(asset_ids)):
         out.append("assets: duplicate asset ids")
-    roles = [f["role"] for f in bundle["frames"]]
-    if roles.count("desktop") < 1:
-        out.append("frames: at least one desktop frame is required")
+    # Any frame can be a page: without a desktop frame, the widest frames (tablet, else mobile) are.
     return out

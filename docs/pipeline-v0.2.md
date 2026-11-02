@@ -117,11 +117,26 @@ Results: desktop fidelity unchanged on every real design (cleaning 99.9 with 0 c
 
 Results: all four real designs (cleaning, services, Peachy Pup, two-page site), ACF free and Pro: identical markup and pixel-identical screenshots; fidelity and code quality unchanged. 102 engine tests.
 
+## v0.8: prototype interactions
+
+| Area | How it works |
+| --- | --- |
+| **Plugin** (`interactions.ts`) | After the frames, collects every instance's main component: its reactions, the variants it changes to (hover / press / click / after-delay chains) and unwired State=Hover / Pressed / Focus siblings (`stateSiblings`). Default and state variants, and every overlay frame, are serialized as extra roots (`parentId` null) with 1x reference PNGs; `bundle.interactions` = {components, overlays, targets}. Read-only. `scrollBehavior`, `overflowDirection` and `numberOfFixedChildren` are serialized too. |
+| **Prepare** (`Interactions.prepare`) | For each instance with states: layers are matched by name path (with an index for repeated names, as Smart Animate does). State-only layers are copied into the instance, hidden (`_reveal`), at the same place in their parent. Then a diff per state: `node_style` (fills, borders, radius, effects, opacity, text style) plus Auto Layout gap and padding. Geometry becomes centre deltas, scale and rotation, except inside reflowing Auto Layout frames, where layout does the moving. A uniformly scaled variant becomes one `scale()`. Hover, press and focus are completed so that each sets every property any of them changes. Overridden fields on the instance are kept. |
+| **CSS** (`Generator.interaction_css`) | `.S:hover .D` inside `@media (hover: hover)`, `:focus-visible` for links and buttons, `:active`, `[aria-expanded="true"]` / `[aria-pressed="true"]` (toggles), `[data-step="k"]` (after-delay chains). Each state rule carries its own transition; the base class gets the hover timing. `prefers-reduced-motion: reduce` removes them. Timing: Figma bézier presets, custom béziers, springs as `linear()` with their settle time. |
+| **Links** (`resolve_links`) | On click: NAVIGATE → the converted frame's file (or a warning), SCROLL_TO → anchor (an id is added when needed), URL (+ `target="_blank"`), BACK / CLOSE → `data-action` / `data-close`, OVERLAY → `data-open`. Texts and cards become `<a>`; icons get `role="button"` + `tabindex`. |
+| **Overlays** | Each overlay frame is built as a mini page (IR + layout, no site container) and rendered in a `<dialog>` at the end of `<body>`: size and fill from the frame, position from `overlayPositionType`, `::backdrop` from the overlay background, an open animation from the transition, `data-close-outside`. Screen-sized overlays are full screen. |
+| **Phone menu** | A small mobile-only icon in the mobile header that opens an overlay (or is named Menu) becomes a button in the shared header, visible only below 768px. Without a mobile frame, a menu too wide for a phone gets a generated menu button and panel. |
+| **Sticky, transitions, motion** | Fixed children / `scrollBehavior` at the top → `position: sticky`. NAVIGATE transitions → `@view-transition` with Figma's timing (shared header and footer keep a `view-transition-name` with Smart Animate). `node.motion.appear` (plugin Motion panel) → `data-animate` + IntersectionObserver. The checker runs with reduced motion, so the resting state is what is measured. |
+| **js/site.js** | Toggles (click, Enter, Space), auto-play (paused on hover, focus and hidden tabs), `data-href`, back, dialogs, the phone menu and scroll-in. Written only when needed; enqueued by the WordPress theme. |
+
+Real-file fixes from the first Auto Layout file (54 → 99.6): digit-safe class names, absolute children of structured roots as section layers (the floating nav pill is a `<nav>`), flex basis = designed width for FILL children, empty frames sized by Auto Layout (fixed height) or aspect ratio, negative offsets for children sticking out of their frame, root side padding as a centred section column, Fit → `contain`, blend modes → `mix-blend-mode`, full-width band frames adopted as the section.
+
 ## Known limits (next steps)
 
 1. **WordPress:** not yet run on a real WordPress install (checked with `php -l` and the stub harness). No Gutenberg blocks or `theme.json` yet.
 2. **Mobile frames:** merged into media queries (v0.6), but only tested on the sample; mobile-only layers are not generated.
 3. **Compositions** (overlapping layers) reflow into a plain column on phones without a mobile frame, and scale like zoom between 768 px and the content width.
-4. **Interactions and motion:** hover variants, prototype links, Smart Animate and the Motion panel are not generated yet (v0.8 / v0.9).
+4. **Interactions:** generated from v0.8 bundles; states are not yet compared visually with their variant images (the references are in the bundle).
 5. **Visual (non-geometry) fixes:** the loop corrects positions and sizes; wrong colours, effects or fonts are reported but not yet auto-fixed.
 6. **Real files tested:** two flat landing pages, a large illustrated page (Peachy Pup) and a two-page site. Still needed: a file built with Auto Layout and components, and one with mobile frames.

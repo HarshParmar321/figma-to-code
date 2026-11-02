@@ -1,5 +1,5 @@
 // Plugin UI: one-click Convert (read → upload → generate + verify), results, and advanced tools.
-import type { Bundle, FrameRole, MainToUi, SelectedFrame, UiToMain } from './types.ts';
+import type { Bundle, FigmaPageFrames, FrameRole, MainToUi, SelectedFrame, UiToMain } from './types.ts';
 import { pageName } from './util.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -16,6 +16,11 @@ const downloadBtn = $<HTMLButtonElement>('download');
 const engineInput = $<HTMLInputElement>('engine');
 
 let frames: SelectedFrame[] = [];
+let canvasFrames: SelectedFrame[] = []; // the canvas selection, kept while frames are picked from pages
+let canvasIgnored: string[] = [];
+let picked: SelectedFrame[] | null = null; // frames chosen in the page picker (any Figma page)
+const pickerEl = $('picker');
+const pickedNoteEl = $('picked-note');
 const roles: Record<string, FrameRole | 'skip'> = {};
 let bundle: Bundle | null = null;
 const assets = new Map<string, Uint8Array>();
@@ -73,7 +78,8 @@ function renderFrames(ignored: string[]) {
       if (!roles[f.id]) roles[f.id] = f.suggestedRole;
       const row = document.createElement('div');
       row.className = 'frame';
-      row.innerHTML = `<span class="name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}<br><span class="page">Page: ${escapeHtml(pageName(f.name))}</span></span>
+      const where = f.figmaPage ? ` · on “${escapeHtml(f.figmaPage)}”` : '';
+      row.innerHTML = `<span class="name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}<br><span class="page">Page: ${escapeHtml(pageName(f.name))}${where}</span></span>
         <span class="size">${Math.round(f.width)}×${Math.round(f.height)}</span>`;
       const select = document.createElement('select');
       for (const r of ['desktop', 'tablet', 'mobile', 'skip']) {
@@ -361,7 +367,58 @@ async function run(task: () => Promise<void>) {
   }
 }
 
-$('select-all').onclick = () => send({ type: 'select-all-frames' });
+$('select-all').onclick = () => {
+  usePicked(null);
+  send({ type: 'select-all-frames' });
+};
+
+$('motion-apply').onclick = () => {
+  send({
+    type: 'set-motion',
+    appear: $<HTMLSelectElement>('motion-appear').value,
+    duration: Number($<HTMLInputElement>('motion-duration').value) || 0.6,
+    delay: Number($<HTMLInputElement>('motion-delay').value) || 0,
+  });
+};
+
+$('pick-pages').onclick = () => {
+  pickerEl.hidden = false;
+  pickerEl.innerHTML = '<div class="empty">Reading the pages of this file…</div>';
+  send({ type: 'list-pages' });
+};
+
+function usePicked(list: SelectedFrame[] | null) {
+  picked = list && list.length ? list : null;
+  frames = picked ?? canvasFrames;
+  pickedNoteEl.hidden = !picked;
+  if (picked) {
+    const pages = new Set(picked.map((f) => f.figmaPage));
+    pickedNoteEl.innerHTML = `${picked.length} frames from ${pages.size} Figma page${pages.size > 1 ? 's' : ''}. <button class="link" id="back-to-canvas">Use the canvas selection instead</button>`;
+    $('back-to-canvas').onclick = () => usePicked(null);
+  }
+  renderFrames(picked ? [] : canvasIgnored);
+}
+
+function renderPicker(pages: FigmaPageFrames[]) {
+  if (!pages.length) {
+    pickerEl.innerHTML = '<div class="empty">No frames found in this file.</div>';
+    return;
+  }
+  const chosen = new Set((picked ?? canvasFrames).map((f) => f.id));
+  const byId = new Map<string, SelectedFrame>();
+  pickerEl.innerHTML = pages.map((p) => `<h3>${escapeHtml(p.name)}</h3>` + p.frames.map((f) => {
+    byId.set(f.id, f);
+    return `<label><input type="checkbox" value="${escapeHtml(f.id)}"${chosen.has(f.id) ? ' checked' : ''}> ${escapeHtml(f.name)}<span class="size">${Math.round(f.width)}×${Math.round(f.height)}</span></label>`;
+  }).join('')).join('') + '<div class="row"><button id="picker-use">Use these frames</button><button id="picker-cancel" class="secondary">Cancel</button></div>';
+  $('picker-use').onclick = () => {
+    const ids = Array.from(pickerEl.querySelectorAll<HTMLInputElement>("input[type=checkbox]:checked"), (i) => i.value);
+    pickerEl.hidden = true;
+    const list = ids.map((id) => byId.get(id)!).filter(Boolean);
+    list.sort((a, b) => (a.suggestedRole === b.suggestedRole ? 0 : b.width - a.width));
+    usePicked(list);
+  };
+  $('picker-cancel').onclick = () => { pickerEl.hidden = true; };
+}
 
 convertBtn.onclick = () => run(async () => {
   resultEl.innerHTML = '';
@@ -408,8 +465,20 @@ window.onmessage = (event: MessageEvent) => {
   if (!msg) return;
   switch (msg.type) {
     case 'selection':
-      frames = msg.frames;
-      renderFrames(msg.ignored);
+      canvasFrames = msg.frames;
+      canvasIgnored = msg.ignored;
+      if (!picked) {
+        frames = msg.frames;
+        renderFrames(msg.ignored);
+      }
+      break;
+    case 'pages':
+      renderPicker(msg.pages);
+      break;
+    case 'motion-set':
+      setStatus(msg.count
+        ? (msg.appear === 'none' ? `Scroll-in animation removed from ${msg.count} layers.` : `Scroll-in animation set on ${msg.count} layers. Convert again to see it.`)
+        : 'Select the layers to animate on the canvas first.', !msg.count);
       break;
     case 'progress':
       setStatus(msg.message);

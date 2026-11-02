@@ -347,10 +347,15 @@ class Converter:
             expr = self.get(name, src)
         return f"<?php f2c_image( {expr}, {php(attrs)} ); ?>"
 
-    def emit_link(self, n: Node, item: dict | None) -> str:
+    def emit_link(self, n: Node, item: dict | None, depth: int = 0) -> str:
+        """A link: its URL (and, for a button or text link, its label) is a link field; everything
+        else inside (an arrow icon, a whole card's content) is kept and converted as usual."""
         href = n.get("href") or "#"
-        label_node = next((c for c in n.elements() if c.tag == "span"), None)
-        title = (label_node.text() if label_node is not None else n.text()).strip()
+        texty = [c for c in n.elements() if c.tag not in ("img", "svg") and c.text().strip()]
+        loose = any(isinstance(c, str) and c.strip() for c in n.children)
+        simple = (loose and not texty) or (not loose and len(texty) == 1 and self.inline_only(texty[0]))
+        label_node = texty[0] if simple and texty else None
+        title = (label_node.text() if label_node is not None else n.text()).strip() if simple else ""
         name = self.slot_name(n, "link", item)
         default = {"url": href, "title": title}
         if item is not None:
@@ -361,13 +366,20 @@ class Converter:
             self.fields.append(Field(name, label(name), "link", default))
             expr = f"f2c_link( {self.get(name, default)} )"
         var = "$f2c_link"
-        inner = "<?php echo esc_html( " + var + "['title'] ); ?>"
-        if label_node is not None:
-            inner = f"<span{attrs_html(label_node)}>{inner}</span>"
+        echo = "<?php echo esc_html( " + var + "['title'] ); ?>"
+        parts = []
+        for c in n.children:
+            if isinstance(c, str):
+                if c.strip():
+                    parts.append(echo if simple else escape(c.strip(), quote=False))
+            elif c is label_node:
+                parts.append(f"<{c.tag}{attrs_html(c)}>{echo}</{c.tag}>")
+            else:
+                parts.append(self.emit(c, 0, item).strip())
         rest = attrs_html(n, skip=("href",))
         return (
             f"<?php {var} = {expr}; ?><a{rest} href=\"<?php echo esc_url( {var}['url'] ); ?>\""
-            f"<?php echo f2c_target( {var} ); ?>>{inner}</a>"
+            f"<?php echo f2c_target( {var} ); ?>>" + "".join(parts) + "</a>"
         )
 
     def emit_menu(self, n: Node, depth: int) -> str:
@@ -382,10 +394,8 @@ class Converter:
         for a in links:
             href = a.get("href") or "#"
             url = f"<?php echo esc_url( f2c_url( {php(href)} ) ); ?>"
-            fallback.append(
-                f'{ind}\t\t\t<li><a{attrs_html(a, skip=("href",))} href="{url}">'
-                f"{escape(a.text().strip(), quote=False)}</a></li>"
-            )
+            body = self.static_inner(a)
+            fallback.append(f'{ind}\t\t\t<li><a{attrs_html(a, skip=("href",))} href="{url}">{body}</a></li>')
         args = {
             "theme_location": "primary",
             "container": False,
@@ -394,6 +404,12 @@ class Converter:
             "depth": 1,
             "f2c_link_class": link_cls,
         }
+        if links and any(isinstance(c, Node) for c in links[0].children):
+            # Menu items built from a link component (label + hover underline): WordPress menu titles
+            # are wrapped in the same markup (see the nav_menu_item_title filter).
+            label_text = links[0].text().strip()
+            item_html = self.static_inner(links[0]).replace("%", "%%")
+            args["f2c_item_html"] = item_html.replace(escape(label_text, quote=False).replace("%", "%%"), "%s", 1)
         return (
             f"{ind}<nav{attrs_html(n)}>\n"
             f"{ind}\t<?php if ( has_nav_menu( 'primary' ) ) : ?>\n"
@@ -402,6 +418,20 @@ class Converter:
             f"{ind}\t\t<ul{attrs_html(ul)}>\n" + "\n".join(fallback) + f"\n{ind}\t\t</ul>\n"
             f"{ind}\t<?php endif; ?>\n{ind}</nav>"
         )
+
+    @staticmethod
+    def static_inner(n: Node) -> str:
+        """Markup inside a node as it is (without the internal attributes)."""
+        out = []
+        for c in n.children:
+            if isinstance(c, str):
+                if c.strip():
+                    out.append(escape(c.strip(), quote=False))
+            elif c.tag in VOID:
+                out.append(f"<{c.tag}{attrs_html(c)}>")
+            else:
+                out.append(f"<{c.tag}{attrs_html(c)}>{Converter.static_inner(c)}</{c.tag}>")
+        return "".join(out)
 
     def emit_form(self, n: Node, depth: int, item: dict | None) -> str:
         ind = "\t" * depth
@@ -673,7 +703,7 @@ add_action(
 	'wp_enqueue_scripts',
 	function () {
 __FONTS__		wp_enqueue_style( '__SLUG__-main', get_theme_file_uri( 'assets/css/main.css' ), array(), F2C_VERSION );
-	}
+__SCRIPTS__	}
 );
 
 /* Menu links get the link class from the design. */
@@ -684,6 +714,17 @@ add_filter(
 			$atts['class'] = $args->f2c_link_class;
 		}
 		return $atts;
+	},
+	10,
+	3
+);
+add_filter(
+	'nav_menu_item_title',
+	function ( $title, $item, $args ) {
+		if ( ! empty( $args->f2c_item_html ) ) {
+			$title = sprintf( $args->f2c_item_html, $title );
+		}
+		return $title;
 	},
 	10,
 	3
@@ -882,7 +923,7 @@ def build_theme(out_dir: Path, conversion: dict, acf: str = "free", reference: P
     htmls, block = fold_corrections(htmls, corr.read_text(encoding="utf-8") if corr.exists() else "")
     css = (out_dir / "css" / "styles.css").read_text(encoding="utf-8") + block
     files[root + "assets/css/main.css"] = css.encode("utf-8")
-    for sub in ("images", "fonts"):
+    for sub in ("images", "fonts", "js"):
         for f in sorted((out_dir / sub).glob("*")) if (out_dir / sub).exists() else []:
             files[root + f"assets/{sub}/{f.name}"] = f.read_bytes()
 
@@ -1048,6 +1089,14 @@ def build_theme(out_dir: Path, conversion: dict, acf: str = "free", reference: P
         files[root + f"acf-json/{g['key']}.json"] = json.dumps(g, indent=2, ensure_ascii=False).encode("utf-8")
 
     # functions.php
+    # Behaviour from the prototype (toggles, auto-play, pop-ups, phone menu): loaded in the footer.
+    scripts = ""
+    if (out_dir / "js" / "site.js").exists():
+        scripts = (
+            f"\t\twp_enqueue_script( '{slug}-site', get_theme_file_uri( 'assets/js/site.js' ), array(), F2C_VERSION, true );\n"
+            # Scroll-in animations start hidden only when JavaScript runs (added early, in <head>).
+            "\t\tadd_action( 'wp_head', function () { echo \"<script>document.documentElement.classList.add('js')</script>\\n\"; }, 2 );\n"
+        )
     fonts = (
         f"\t\twp_enqueue_style( '{slug}-fonts', {php(fonts_href)}, array(), null ); // phpcs:ignore\n"
         if fonts_href else ""
@@ -1064,6 +1113,7 @@ def build_theme(out_dir: Path, conversion: dict, acf: str = "free", reference: P
         .replace("__PAGES__", php(page_meta))
         .replace("__MENU__", php(menu))
         .replace("__FONTS__", fonts)
+        .replace("__SCRIPTS__", scripts)
     ).encode("utf-8")
 
     files[root + "style.css"] = (

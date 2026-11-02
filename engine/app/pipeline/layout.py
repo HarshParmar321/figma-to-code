@@ -186,7 +186,7 @@ def layout_container(c: El) -> None:
     if c.auto and c.node is not None:
         mode = "row" if c.node.get("layoutMode") == "HORIZONTAL" else "column"
         c.layout = {"mode": mode, "auto": True}
-        for ch in c.children:
+        for ch in c.layers + c.children:
             if ch.children:
                 layout_container(ch)
         return

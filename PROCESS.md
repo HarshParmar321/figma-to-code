@@ -12,11 +12,12 @@ Every conversion proves itself with two scores: **fidelity** (does it match Figm
 
 ---
 
-## Current status: v0.7
+## Current status: v0.8
 
 | Real design | Layers | Fidelity at design width | Elements in place | Code quality |
 | --- | --- | --- | --- | --- |
-| Cleaning landing page | 179 | **99.9** (correct on the first render, 0 corrections) | 88 / 88 | **94** Excellent |
+| Minimal Landing Page (community, built with Auto Layout and components) | 204 | **99.6** (was 54 before v0.8) | 202 / 203 | **97** Excellent |
+| Cleaning landing page | 179 | **99.9** (correct on the first render, 0 corrections) | 88 / 88 | **96** Excellent |
 | Moving services page | ~500 | 69\* | 76 / 83 | **95** Excellent |
 | Peachy Pup Bakery | 10,949 | 69\* (section similarity 98 / 95 / 95 / 100%) | 91 / 94 | **87.5** Good |
 | Two-page test site | 2 × 179 | **99.1** | shared header, footer and 2 sections | **91** Excellent |
@@ -28,7 +29,8 @@ Every conversion proves itself with two scores: **fidelity** (does it match Figm
 
 - **Speed:** Peachy Pup (10,949 layers) converts and checks in about 15 seconds. Before v0.4 the check never finished.
 - **WordPress theme:** on all four real designs, in both ACF modes, the theme renders the same markup as the checked HTML and its screenshots are pixel-identical.
-- **Tests:** 102 engine tests and 9 plugin tests, plus lint and format checks in CI.
+- **Interactions:** an interactive 3-page fixture (hover / press states, toggles, slider, modal, phone menu, sticky header) behaves like the prototype in Chromium, and its WordPress theme renders the same markup.
+- **Tests:** 111 engine tests and 11 plugin tests, plus lint and format checks in CI.
 
 ---
 
@@ -152,6 +154,31 @@ Every conversion proves itself with two scores: **fidelity** (does it match Figm
   - the result matches the clean HTML tag for tag (with ACF missing, with empty fields and with edited fields)
   - screenshots of both are pixel-identical
 
+### v0.8: prototype interactions, and the first real Auto Layout file
+
+- **The first real Auto Layout file** ("Minimal Landing Page", from Figma Community) scored 54. Fixed, it scores **99.6** (202 of 203 elements in place):
+  - class names starting with a digit (a section titled "01" gave `.01__card`, which browsers ignore): now `s-01`
+  - a menu pill set to "Ignore Auto Layout" became a fake full-width section that blurred the header; it is now a layer of the section it sits on, and a real `<nav>`
+  - FILL siblings with different paddings came out 25px apart (flex basis 0 counts padding); the basis is now the designed width
+  - empty frames with an image fill collapsed (no height); they keep Figma's fixed height or their aspect ratio
+  - a device mockup sticking out of its frame now keeps its negative offset
+  - the root frame's side padding makes the sections a centred column, as in Figma
+  - Fit images use `background-size: contain`; layer blend modes (Multiply, Exclusion…) become `mix-blend-mode`
+  - a full-width "Header" / "Footer" frame holding a whole band is the section itself
+- **Prototype interactions** (`interactions.py`, plugin `interactions.ts`):
+  - the plugin now sends every interactive component: its default variant, its state variants (hover, press, focus, click, after-delay chains, plus unwired State=Hover / Pressed / Focus variants), the overlays that open and where each connection goes. Nothing in the file is changed.
+  - states are compared with the default variant the way Smart Animate matches layers (by name path). Only what changes is written: colours, borders, radius, shadows, opacity, text style, movement / scale / rotation as transforms. Auto Layout changes (gap, padding, layers appearing) reflow like Figma. Pressing fully replaces the hover look, as in Figma.
+  - Figma timing is kept: duration, the named curves, custom béziers and springs (as CSS `linear()` curves)
+  - links, toggles, sliders, `<dialog>` overlays, the phone menu, sticky header, view transitions and scroll-in animations (see the README for the list)
+  - layers that only exist in a state (an accordion's answer) are added to the page, hidden
+- **Better phone frames:** repeated icons are matched by what is next to them (the arrow of "Get started" pairs with the arrow of the mobile "Get started"), a button or menu missing on mobile is hidden as a whole, and a shared header behaves the same on pages without their own mobile frame.
+- **Plugin:**
+  - **Pick from all pages…** chooses frames on any Figma page
+  - phone-only and tablet-only designs convert (the widest frames are the pages)
+  - **Motion** panel for scroll-in animations
+  - the Download options layout is fixed
+- **WordPress:** the theme ships `js/site.js` (enqueued in the footer) and the dialogs. Links keep their icons and card content, and menus built from link components keep their markup.
+
 Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-v0.2.md).
 
 ---
@@ -174,16 +201,16 @@ Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-
 - [ ] Blog templates (archive, single post) styled like the design, when the design has them.
 - [ ] A contact form plugin option (Contact Form 7 / WPForms markup) next to the built-in handler.
 
-### v0.8: navigation and interactions
+### v0.8 follow-ups
 
-- [ ] Figma prototype links: "navigate to" becomes a page link, "scroll to" becomes an anchor, and overlays become pop-ups.
-- [ ] A sticky header when the header is set to fixed position in Figma.
-- [ ] **Hover, focus and pressed states** from component variants (State = Hover…) and hover interactions, with transitions.
-- [ ] A hamburger menu on phones when the design has one or the menu doesn't fit (the first JavaScript in the output, also in the theme).
+- [ ] **Run the new plugin on a file with prototype connections** (your own file plus a Community template) and tune it. Interactions are only in bundles made with the v0.8 plugin.
+- [ ] **Check states against Figma:** hover / press each element and open each overlay in Chromium, then compare with the variant and overlay images the plugin already sends (they are in the bundle, not compared yet).
+- [ ] Hover changes on icons exported as one SVG (a colour change inside an icon) are not generated yet.
+- [ ] Prototype "Swap overlay", "Set variable" and conditional actions; keyboard shortcuts; video actions.
+- [ ] Tabs: several click states that switch together.
 
 ### v0.9: motion and complex CSS
 
-- [ ] Smart Animate becomes CSS transitions, plus scroll-in animations (tiny JavaScript that respects "reduce motion").
 - [ ] Tabs, accordions and carousels from interactive components.
 - [ ] Full effects coverage: multiple and inner shadows, blurs, blend modes, gradient text, every stroke type, rotation and image filters. Plus a clear rule for when an effect is better exported as an image.
 - [ ] Visual auto-fix: compare colours and crops per element, not only positions.
@@ -207,6 +234,6 @@ Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-
 
 - Without the real font files, text measures slightly differently and the score is capped (this is intentional).
 - Phones without a mobile frame get an inferred layout. Normal sections reflow well; sections built from overlapping layers become a plain vertical flow that is readable but not designed.
-- Hover states and animations are not generated yet.
+- Hover states, pop-ups and animations come from bundles made with the v0.8 plugin; older bundles have no interaction data.
 - The WordPress theme has not been run on a real WordPress install yet (see WordPress follow-ups).
 - The live preview carries `data-figma-id` attributes for the check; the downloaded code does not.

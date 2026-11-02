@@ -141,7 +141,7 @@ def static_report(html_files: list[Path], css: str) -> dict:
 
 
 def _measure(browser, path: Path, width: int) -> dict:
-    pg = browser.new_page(viewport={"width": width, "height": 900})
+    pg = browser.new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce")
     try:
         pg.goto(path.resolve().as_uri(), wait_until="domcontentloaded", timeout=60_000)
         pg.wait_for_timeout(150)

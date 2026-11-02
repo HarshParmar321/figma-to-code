@@ -48,9 +48,77 @@
       "type": "array",
       "items": { "$ref": "#/$defs/diagnostic" },
       "default": []
-    }
+    },
+    "interactions": { "$ref": "#/$defs/interactions" }
   },
   "$defs": {
+    "interactions": {
+      "type": "object",
+      "description": "Prototype interactions: interactive components with their state variants, overlays, and link targets. Variant and overlay layers are serialized in `nodes` as extra roots (parentId null).",
+      "properties": {
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "states"],
+            "properties": {
+              "id": { "type": "string", "description": "Main component (default state)." },
+              "name": { "type": "string" },
+              "setId": { "type": ["string", "null"] },
+              "setName": { "type": ["string", "null"] },
+              "variantProperties": { "type": ["object", "null"] },
+              "reactions": { "type": "array", "description": "The main component's own reactions (inherited by instances)." },
+              "referenceAsset": { "type": ["string", "null"] },
+              "states": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["variantId", "trigger"],
+                  "properties": {
+                    "variantId": { "type": "string" },
+                    "name": { "type": "string" },
+                    "variantProperties": { "type": ["object", "null"] },
+                    "trigger": { "enum": ["hover", "press", "focus", "click", "timeout"] },
+                    "wired": { "type": "boolean", "description": "false: a State=Hover variant without a prototype connection." },
+                    "transition": { "type": ["object", "null"], "description": "Figma transition: type, duration (seconds), easing." },
+                    "timeout": { "type": "number", "description": "AFTER_TIMEOUT delay in seconds." },
+                    "order": { "type": "integer" },
+                    "from": { "type": "string" },
+                    "referenceAsset": { "type": ["string", "null"] }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "overlays": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["rootId"],
+            "properties": {
+              "rootId": { "type": "string" },
+              "name": { "type": "string" },
+              "positionType": { "type": "string" },
+              "background": {},
+              "closeOnOutside": { "type": "boolean" },
+              "referenceAsset": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "targets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "type": { "type": "string" },
+              "topFrameId": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
     "source": {
       "type": "object",
       "required": ["fileName", "pluginVersion", "exportedAt"],

@@ -325,10 +325,8 @@ def download_code(bundle_id: str, format: str = "html", acf: str = "free") -> Re
 
 
 def _reference_png(bundle: dict, bdir: Path) -> Path | None:
-    """The first desktop frame's 1x reference image (used for the theme screenshot)."""
-    for frame in bundle.get("frames", []):
-        if frame.get("role") != "desktop":
-            continue
+    """The widest frame's 1x reference image (used for the theme screenshot)."""
+    for frame in sorted(bundle.get("frames", []), key=lambda f: -float(f.get("width") or 0)):
         for asset_id in frame.get("referenceAssets", []):
             f = bdir / "assets" / f"{asset_id}.png"
             if f.exists() and asset_id.endswith("1x"):

@@ -161,7 +161,10 @@ class Renderer:
                 self._pw.stop()
 
     def capture(self, html_path: Path, width: int, ids: list[str], screenshot: Path) -> tuple[dict, dict]:
-        pg = self._browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=1)
+        # Reduced motion: the design's resting state (no scroll-in fades, no auto-play) is what is measured.
+        pg = self._browser.new_page(
+            viewport={"width": width, "height": 900}, device_scale_factor=1, reduced_motion="reduce"
+        )
         try:
             pg.goto(html_path.resolve().as_uri(), wait_until="domcontentloaded", timeout=60_000)
             pg.add_style_tag(content="*{caret-color:transparent !important}")

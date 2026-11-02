@@ -15,6 +15,8 @@ const COMMON_PROPS = [
   'strokeBottomWeight', 'strokeLeftWeight', 'strokeAlign', 'strokeCap', 'strokeJoin', 'dashPattern',
   'cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius', 'cornerSmoothing',
   'effects', 'boundVariables', 'fillStyleId', 'strokeStyleId', 'effectStyleId', 'exportSettings',
+  // Prototype scrolling: fixed / sticky layers and scrolling frames (carousels).
+  'scrollBehavior', 'overflowDirection', 'numberOfFixedChildren',
 ];
 
 const LAYOUT_PROPS = [

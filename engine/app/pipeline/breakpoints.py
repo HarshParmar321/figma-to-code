@@ -76,12 +76,56 @@ def match(desk: Page, mob: Page, hashes: dict[str, str] | None = None) -> Match:
         k = key(e)
         if k:
             groups[k].append(e)
+    # Texts first (i-th occurrence ↔ i-th occurrence), then repeated icons and shapes by context: an
+    # icon goes with the one next to the text its own neighbour matched (the arrow of the "Get started"
+    # button pairs with the arrow of the mobile "Get started" button, even if another button with the
+    # same arrow comes first on desktop and is missing on mobile).
+    parent: dict[int, El] = {}
+    for e in _walk(desk):
+        for c in e.layers + e.children:
+            parent[id(c)] = e
+    deferred: list[tuple[tuple, list[El]]] = []
     for k, desk_items in groups.items():
         cands = by_key.get(k, [])
+        if k[0] != "text" and (len(desk_items) > 1 or len(cands) > 1):
+            deferred.append((k, desk_items))
+            continue
         for d_el, m_el in zip(desk_items, cands, strict=False):  # i-th occurrence ↔ i-th occurrence
             m.pairs[id(d_el)] = m_el
             used.add(id(m_el))
         m.unmatched += desk_items[len(cands) :]
+
+    def context(d_el: El) -> El | None:
+        """The mobile match of a text next to d_el (in its button, card or row; never the whole section)."""
+        node, depth = parent.get(id(d_el)), 0
+        while node is not None and node.kind not in ("section", "container", "page") and depth < 2:
+            for x in node.walk():
+                if x is not d_el and x.kind == "text" and id(x) in m.pairs:
+                    return m.pairs[id(x)]
+            node, depth = parent.get(id(node)), depth + 1
+        return None
+
+    for k, desk_items in deferred:
+        free = [c for c in by_key.get(k, []) if id(c) not in used]
+        leftover = []
+        for d_el in desk_items:
+            ctx = context(d_el)
+            if ctx is None or not free:
+                leftover.append(d_el)
+                continue
+            best = min(free, key=lambda c: abs(c.x - ctx.x) + abs(c.y - ctx.y))
+            if abs(best.y - ctx.y) + abs(best.x - ctx.x) > 240:
+                leftover.append(d_el)  # nothing of this kind near its neighbour on mobile
+                continue
+            m.pairs[id(d_el)] = best
+            used.add(id(best))
+            free.remove(best)
+        for d_el in leftover:
+            if free and context(d_el) is None:
+                m.pairs[id(d_el)] = free.pop(0)
+                used.add(id(m.pairs[id(d_el)]))
+            else:
+                m.unmatched.append(d_el)
     m.unmatched += [e for e in d_leaves if key(e) is None and id(e) not in m.pairs]
     m.mobile_only = [e for e in m_leaves if id(e) not in used and key(e) is not None]
 
@@ -136,10 +180,24 @@ def derive_css(desk: Page, mob: Page, m: Match) -> dict[int, dict[str, str]]:
     out: dict[int, dict[str, str]] = defaultdict(dict)
     MW = mob.width
 
-    # Hidden on this breakpoint: content leaves that the frame does not contain at all.
-    for e in m.unmatched:
-        if e.kind in ("text", "image", "svg", "raster", "shape"):
+    # Hidden on this breakpoint: content the frame does not contain at all. A button, card, menu or
+    # row whose content is all missing is hidden as a whole (not left behind as an empty box).
+    missing = {id(e) for e in m.unmatched if e.kind in LEAVES}
+
+    def hide(e: El) -> None:
+        if e.kind in LEAVES:
+            if id(e) in missing:
+                out[id(e)]["display"] = "none"
+            return
+        leaves = [x for x in e.walk() if x.kind in LEAVES]
+        if e.kind in ("box", "wrapper") and leaves and all(id(x) in missing for x in leaves):
             out[id(e)]["display"] = "none"
+            return
+        for c in e.layers + e.children:
+            hide(c)
+
+    for sec in desk.sections:
+        hide(sec)
 
     prev_bottom = 0.0
     lefts: list[float] = []

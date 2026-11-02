@@ -96,7 +96,7 @@ export function maskGroupExport(type: string, hasMaskChild: boolean, hasText: bo
 export function validateRoles(roles: Record<string, FrameRole>): string | null {
   const values = Object.values(roles);
   if (values.length === 0) return 'Select at least one frame.';
-  if (!values.includes('desktop')) return 'Mark at least one frame as Desktop (each desktop frame becomes a page).';
+  // Without a desktop frame, the widest frames (tablet, else mobile) become the pages.
   return null;
 }
 
@@ -106,4 +106,59 @@ const DEVICE_WORDS = /\b((iphone|ipad|pixel|galaxy|android|macbook)(\s*(\d+\w*|p
 export function pageName(frameName: string): string {
   const cleaned = frameName.replace(DEVICE_WORDS, ' ').replace(/[\s/|_\-–—:()[\]]+/g, ' ').trim();
   return cleaned || frameName.trim() || 'Page';
+}
+
+// ------------------------------------------------------------------ interactions (pure helpers)
+/** Variant values that name an interaction state, and the CSS state they become. */
+const STATE_WORDS: Array<[RegExp, 'hover' | 'press' | 'focus']> = [
+  [/^(hover|hovered|on hover|mouse ?over)$/i, 'hover'],
+  [/^(pressed|press|active|clicked|tap|tapped)$/i, 'press'],
+  [/^(focus|focused|focus[- ]visible|keyboard focus)$/i, 'focus'],
+];
+
+export function stateOfValue(value: string): 'hover' | 'press' | 'focus' | null {
+  const v = value.trim();
+  for (const [re, state] of STATE_WORDS) if (re.test(v)) return state;
+  return null;
+}
+
+/**
+ * Sibling variants that are interaction states of `base`: they differ from it in exactly one
+ * property, whose value is a state word (State=Hover next to State=Default). Returns
+ * [variant index, state] pairs. Used when the designer drew hover variants without wiring them.
+ */
+export function stateSiblings(
+  base: Record<string, string>,
+  siblings: Array<Record<string, string>>,
+): Array<[number, 'hover' | 'press' | 'focus']> {
+  if (Object.values(base).some((v) => stateOfValue(v))) return []; // the base itself is a state
+  const out: Array<[number, 'hover' | 'press' | 'focus']> = [];
+  siblings.forEach((props, i) => {
+    const diff = Object.keys(base).filter((k) => props[k] !== base[k]);
+    if (diff.length !== 1 || Object.keys(props).length !== Object.keys(base).length) return;
+    const state = stateOfValue(props[diff[0]] ?? '');
+    if (state && !out.some(([, s]) => s === state)) out.push([i, state]);
+  });
+  return out;
+}
+
+export type TriggerKind = 'hover' | 'press' | 'click' | 'timeout' | 'enter' | 'leave' | 'other';
+
+/** Figma prototype trigger → how the web page reacts. "While hovering" is ON_HOVER. */
+export function triggerKind(trigger: { type?: string } | null | undefined): TriggerKind {
+  switch (trigger?.type) {
+    case 'ON_HOVER': return 'hover';
+    case 'ON_PRESS': case 'MOUSE_DOWN': return 'press';
+    case 'ON_CLICK': case 'MOUSE_UP': return 'click';
+    case 'AFTER_TIMEOUT': return 'timeout';
+    case 'MOUSE_ENTER': return 'enter';
+    case 'MOUSE_LEAVE': return 'leave';
+    default: return 'other';
+  }
+}
+
+/** A reaction's actions (newer files use `actions`, older ones a single `action`). */
+export function reactionActions(r: { actions?: unknown[]; action?: unknown }): Array<Record<string, unknown>> {
+  const list = Array.isArray(r.actions) ? r.actions : r.action ? [r.action] : [];
+  return list.filter((a): a is Record<string, unknown> => !!a && typeof a === 'object');
 }

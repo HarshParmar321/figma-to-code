@@ -7,11 +7,11 @@ Most Figma-to-code tools give you either a picture-perfect page that no develope
 - **Fidelity** (0–100): does it match Figma? It checks positions and sizes, typography, colours, images and visual similarity per section.
 - **Code quality** (0–100): is it code a front-end developer would ship? It looks at structure, headings, alt text and fixed sizes, then renders the page at 390, 768 and 1280px to catch sideways scrolling, overlapping text and text pushed off screen.
 
-> **Status: v0.7.** See [PROCESS.md](PROCESS.md) for what has been built, the results on real designs and what remains.
+> **Status: v0.8.** See [PROCESS.md](PROCESS.md) for what has been built, the results on real designs and what remains.
 
 ## What it does today
 
-- **One click in Figma:** select one desktop frame per page (or click **Select all frames on this page**) and click **Convert to code**. The plugin shows each step as it happens.
+- **One click in Figma:** select one desktop frame per page (or **All on this page**, or **Pick from all pages…** for frames spread over several Figma pages) and click **Convert to code**. A phone-only or tablet-only design works too. The plugin shows each step as it happens.
 - **Multi-page sites:** you get `index.html`, `about.html` and so on, sharing one stylesheet, the images and the fonts. Menu items link to the matching page.
 - **Reusable sections:** a header, footer or section that repeats across pages is generated once, in `components/`, with the same markup and classes on every page.
 - **Clean structure:**
@@ -19,6 +19,14 @@ Most Figma-to-code tools give you either a picture-perfect page that no develope
   - a shared `.btn` component and design tokens (CSS variables)
   - semantic HTML: `header`, `nav > ul > li > a`, sections with ids, a proper heading order, and alt text
 - **Single-page navigation:** menu links scroll smoothly to the section of the same name, and buttons like "Contact us" or "Get in touch" go to the contact section.
+- **Prototype interactions become real behaviour:**
+  - "Navigate to" → page links, "Scroll to" → section anchors, "Open link" → URL (new tab when set), "Back" → history back
+  - hover, press and focus states from component variants (wired with "While hovering / pressing", or simply named State=Hover / Pressed / Focus), written as CSS with Figma's own timing (durations, easing curves and springs)
+  - click toggles (accordions, switches: content that only exists in the Open variant is added and revealed), "After delay" variant chains → auto-playing sliders
+  - "Open overlay" → `<dialog>` pop-ups and modals (position, backdrop, close on outside click, Close buttons, Move in / Dissolve animations); a phone menu icon from the mobile frame opens its menu overlay
+  - "Fix position when scrolling" → sticky header; Smart Animate page navigation → view transitions
+  - scroll-in animations set per layer in the plugin (**Motion**), since Figma has none of its own
+  - everything respects "reduce motion"; one small `js/site.js`, only when needed
 - **Every screen size:**
   - mobile and tablet frames become media queries, and the phone layout is checked against your mobile frame
   - without them, the layout reflows by itself
@@ -47,9 +55,10 @@ engine/             Engine (Python 3.11+, FastAPI)
   app/pipeline/     ir → layout → generate → fidelity → corrections, orchestrated by convert.py
                     components.py (shared sections), breakpoints.py (mobile/tablet frames),
                     quality.py (code quality score), export.py (clean download),
-                    wordpress.py (WordPress theme: PHP templates + ACF / ACF Pro), fonts.py
+                    wordpress.py (WordPress theme: PHP templates + ACF / ACF Pro), fonts.py,
+                    interactions.py (prototype states, links, overlays, timing → CSS and js/site.js)
   app/spike_report.py   design check (Auto Layout coverage, sections, tips)
-  tests/            102 tests (browser tests need Chromium, theme tests need PHP)
+  tests/            111 tests (browser tests need Chromium, theme tests need PHP)
 fixtures/           sample bundle + generator script
 docs/               pipeline notes (every version) and the first spike
 PROCESS.md          progress log: done, results, remaining

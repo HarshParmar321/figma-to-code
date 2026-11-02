@@ -162,3 +162,22 @@ def test_background_job_with_progress(client, bundle):
     assert job["status"] == "done", job
     assert job["result"]["pages"][0]["file"] == "index.html"
     assert job["stage"] == "Done"
+
+
+def test_phone_only_design_converts(client, bundle):
+    """Only a mobile frame selected: it becomes the page, laid out as drawn (no inferred phone stacking)."""
+    import json
+
+    from app import main
+    from tests.test_pipeline import real_assets
+
+    mobile = next(f for f in bundle["frames"] if f["role"] == "mobile")
+    bundle["frames"] = [mobile]
+    data = real_assets(bundle)
+    bid = client.post("/v1/bundles", content=json.dumps(bundle)).json()["bundleId"]
+    for a in bundle["assets"]:
+        client.put(f"/v1/bundles/{bid}/assets/{a['id']}", content=data[a["id"]])
+    res = client.post(f"/v1/bundles/{bid}/convert?verify=false&wait=true").json()
+    assert [p["file"] for p in res["pages"]] == ["index.html"]
+    html = (main.store.bundle_dir(bid) / "output" / "index.html").read_text()
+    assert "<h1" in html and " l-row" not in html  # rows stay rows: the design is already a phone layout
