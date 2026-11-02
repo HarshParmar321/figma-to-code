@@ -19,6 +19,7 @@ from .config import settings
 from .pipeline import fonts as fontfiles
 from .pipeline.convert import convert
 from .pipeline.export import clean_site
+from .pipeline.wordpress import build_theme
 from .schema import validate_bundle
 from .spike_report import build_report
 from .storage import BundleStore, DiskFull, NotFound, is_disk_full
@@ -183,6 +184,8 @@ def _links(bundle_id: str) -> dict:
         "previewUrl": f"{base}/output/index.html",
         "reportUrl": f"{base}/fidelity/report.html",
         "zipUrl": f"{base}/code.zip",
+        "themeUrl": f"{base}/code.zip?format=wordpress&acf=free",
+        "themeProUrl": f"{base}/code.zip?format=wordpress&acf=pro",
     }
 
 
@@ -286,23 +289,51 @@ def get_conversion(bundle_id: str) -> dict:
 
 
 @app.get("/v1/bundles/{bundle_id}/code.zip")
-def download_code(bundle_id: str) -> Response:
-    """The generated site as a zip, built on request: clean code (no data-figma-id, corrections folded
-    into the real classes). The live preview keeps the instrumented version for the design check."""
+def download_code(bundle_id: str, format: str = "html", acf: str = "free") -> Response:
+    """The generated code as a zip, built on request.
+
+    `format=html` (default): clean HTML/CSS (no data-figma-id, corrections folded into the classes).
+    `format=wordpress`: a WordPress theme with PHP templates and ACF fields; `acf=free` or `acf=pro`.
+    The live preview keeps the instrumented version for the design check."""
+    if format not in ("html", "wordpress") or acf not in ("free", "pro"):
+        raise HTTPException(400, "format must be html or wordpress; acf must be free or pro")
     try:
-        out = store.bundle_dir(bundle_id) / "output"
+        bdir = store.bundle_dir(bundle_id)
     except NotFound as e:
         raise HTTPException(404, "Bundle not found") from e
+    out = bdir / "output"
     if not (out / "index.html").exists():
         raise HTTPException(404, "Not converted yet")
-    meta = store.load(bundle_id)["source"]
+    bundle = store.load(bundle_id)
+    meta = bundle["source"]
+    name = "".join(c if c.isalnum() or c in "-_" else "-" for c in meta.get("fileName", "design")).strip("-")
+    if format == "wordpress":
+        conv_path = bdir / "conversion.json"
+        conversion = json.loads(conv_path.read_text(encoding="utf-8")) if conv_path.exists() else {}
+        files = build_theme(out, conversion, acf, _reference_png(bundle, bdir))
+        theme = next(iter(files)).split("/")[0] if files else "theme"
+        filename = f"{theme}-wordpress-{'acf-pro' if acf == 'pro' else 'acf'}.zip"
+    else:
+        files = clean_site(out, meta.get("fileName", "Site"))
+        filename = f"{name or 'design'}-code.zip"
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for rel, data in clean_site(out, meta.get("fileName", "Site")).items():
+        for rel, data in files.items():
             z.writestr(rel, data)
-    name = "".join(c if c.isalnum() or c in "-_" else "-" for c in meta.get("fileName", "design")).strip("-")
-    headers = {"Content-Disposition": f'attachment; filename="{name or "design"}-code.zip"'}
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return Response(buf.getvalue(), media_type="application/zip", headers=headers)
+
+
+def _reference_png(bundle: dict, bdir: Path) -> Path | None:
+    """The first desktop frame's 1x reference image (used for the theme screenshot)."""
+    for frame in bundle.get("frames", []):
+        if frame.get("role") != "desktop":
+            continue
+        for asset_id in frame.get("referenceAssets", []):
+            f = bdir / "assets" / f"{asset_id}.png"
+            if f.exists() and asset_id.endswith("1x"):
+                return f
+    return None
 
 
 @app.get("/v1/bundles/{bundle_id}/output/{path:path}")

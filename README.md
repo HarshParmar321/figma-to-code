@@ -1,17 +1,17 @@
 # Figma to Code
 
-A Figma plugin plus a backend **Engine** that turns a Figma design into clean, responsive HTML/CSS that is **checked against the design pixel by pixel**. A WordPress theme (PHP + ACF) built from the same HTML comes next.
+A Figma plugin plus a backend **Engine** that turns a Figma design into clean, responsive HTML/CSS that is **checked against the design pixel by pixel**, or into a ready-to-install **WordPress theme** (PHP templates + ACF or ACF Pro fields) built from the same verified HTML.
 
 Most Figma-to-code tools give you either a picture-perfect page that no developer can maintain, or tidy code that no longer looks like the design. This project does both and proves it. Every conversion is rendered in a real browser, measured against the Figma frame, corrected automatically, and then given two scores:
 
 - **Fidelity** (0–100): does it match Figma? It checks positions and sizes, typography, colours, images and visual similarity per section.
 - **Code quality** (0–100): is it code a front-end developer would ship? It looks at structure, headings, alt text and fixed sizes, then renders the page at 390, 768 and 1280px to catch sideways scrolling, overlapping text and text pushed off screen.
 
-> **Status: v0.6.** See [PROCESS.md](PROCESS.md) for what has been built, the results on real designs and what remains.
+> **Status: v0.7.** See [PROCESS.md](PROCESS.md) for what has been built, the results on real designs and what remains.
 
 ## What it does today
 
-- **One click in Figma:** select one desktop frame per page and click **Convert to code**. The plugin shows each step as it happens.
+- **One click in Figma:** select one desktop frame per page (or click **Select all frames on this page**) and click **Convert to code**. The plugin shows each step as it happens.
 - **Multi-page sites:** you get `index.html`, `about.html` and so on, sharing one stylesheet, the images and the fonts. Menu items link to the matching page.
 - **Reusable sections:** a header, footer or section that repeats across pages is generated once, in `components/`, with the same markup and classes on every page.
 - **Clean structure:**
@@ -25,7 +25,9 @@ Most Figma-to-code tools give you either a picture-perfect page that no develope
   - big type and spacing scale smoothly with `clamp()`
   - Figma Auto Layout settings (gap, padding, alignment, fill / hug / fixed) are used as they are
 - **Real forms:** drawn input fields become `<form>`, `<input>`, `<textarea>` and `<button type="submit">`.
-- **Clean download:** the zip has no internal attributes, the corrections are folded into the real classes, and a README is included.
+- **Two downloads from the same conversion:**
+  - **Clean HTML and CSS:** no internal attributes, the corrections folded into the real classes, and a README. (Nothing needs JavaScript yet; the menu scrolling is CSS. JavaScript comes with the interactions in v0.8.)
+  - **WordPress theme** for **ACF** (free) or **ACF Pro**: every page, section, text, image, button and repeated card is editable, shared sections are edited once, and the theme renders exactly the HTML that passed the design check (see [WordPress theme](#wordpress-theme)).
 - **Self-correcting:** elements that land off their Figma position are fixed in `css/corrections.css` (desktop only) over up to 6 rounds.
 - **Hard designs:**
   - masks, cropped images and exact gradients
@@ -44,9 +46,10 @@ engine/             Engine (Python 3.11+, FastAPI)
   app/storage.py    bundle storage, disk housekeeping
   app/pipeline/     ir → layout → generate → fidelity → corrections, orchestrated by convert.py
                     components.py (shared sections), breakpoints.py (mobile/tablet frames),
-                    quality.py (code quality score), export.py (clean download), fonts.py
+                    quality.py (code quality score), export.py (clean download),
+                    wordpress.py (WordPress theme: PHP templates + ACF / ACF Pro), fonts.py
   app/spike_report.py   design check (Auto Layout coverage, sections, tips)
-  tests/            97 tests (browser tests run when Chromium is installed)
+  tests/            102 tests (browser tests need Chromium, theme tests need PHP)
 fixtures/           sample bundle + generator script
 docs/               pipeline notes (every version) and the first spike
 PROCESS.md          progress log: done, results, remaining
@@ -67,6 +70,35 @@ PROCESS.md          progress log: done, results, remaining
    - images converted to WebP and cropped as in Figma; fonts self-hosted when available
 5. **Check:** the page is rendered in Chromium at the design width and every element is measured against Figma. The loop writes corrections, re-renders and measures again.
 6. **Score:** the fidelity score, the code quality score, and an HTML report with side-by-side and difference images.
+7. **Download:** the clean site, or the WordPress theme built from it (on demand, when you click **Download**).
+
+## WordPress theme
+
+The theme is a classic PHP theme generated from the clean HTML, so it looks exactly like the checked page. With the stub harness in `engine/tests/`, the templates render the same markup as the HTML (with ACF missing, with empty fields and with edited fields), and screenshots of both are pixel-identical on every real design tested.
+
+**Install:** Appearance → Themes → Add New → Upload Theme, choose the zip, Activate. Then install **ACF** or **ACF Pro** (the one you downloaded the theme for). On activation the theme creates the design's pages, sets the first page as the front page and builds the "Main menu". The field groups load from `acf-json/`; if ACF offers a **Sync**, click it.
+
+```
+<theme>/
+  style.css, functions.php, screenshot.png, readme.txt
+  header.php, footer.php        <head>, the shared site header / footer (template parts)
+  front-page.php                the first page; templates/page-<slug>.php for the others (Template Name)
+  page.php, index.php           any other page or post (title + content, inside the same header/footer)
+  template-parts/sections/<page>/<section>.php   each section of a page
+  template-parts/components/<name>.php           sections shared by several pages (one file, edited once)
+  inc/template-tags.php         field helpers (each falls back to the design's content)
+  acf-json/                     field groups (ACF local JSON)
+  assets/css/main.css, assets/images/, assets/fonts/
+```
+
+| | ACF (free) | ACF Pro |
+| --- | --- | --- |
+| Page content | One field group per page, one tab per section | **Page sections** (Flexible Content): every section of the design is a layout you can add, remove or reorder on any page |
+| Repeated cards, team members, steps | Numbered fields (Card 1, Card 2…) | **Repeaters**: add or remove items |
+| Header, footer, shared sections | Edited once, on the front page | Edited once, in **Site settings** (options page) |
+| Without ACF | Shows the design's content | Same |
+
+Both: texts are text or textarea fields (`esc_html` / `wp_kses_post`), images are image fields (`wp_get_attachment_image`, falling back to the theme's image), buttons and links are link fields (URL, label, target), and the menu uses `wp_nav_menu` (falling back to the design's links). Forms post to `admin-post.php` with a nonce and send the message to the site's admin email.
 
 ## Requirements
 
@@ -105,7 +137,8 @@ In the Figma desktop app, open a design file and press **Cmd + /**. Run **Import
 
 1. Select one desktop frame per page (Home, About, Contact…), plus a mobile (and tablet) frame per page if you have them, all on the same Figma page. Name them alike ("Home / Desktop", "Home / Mobile") so they are paired.
 2. Click **Convert to code** and watch the steps: Read design → Upload → Generate and check (including correction rounds).
-3. Review the fidelity score, the phone/tablet scores (when you gave those frames), the code quality score, the pages and the shared components. Then use **Open preview**, **Report** or **Download code**.
+3. Review the fidelity score, the phone/tablet scores (when you gave those frames), the code quality score, the pages and the shared components. Then use **Open preview** or **Report**.
+4. Under **Download**, choose **Clean HTML and CSS**, **WordPress theme · ACF** or **WordPress theme · ACF Pro**, then click **Download code**.
 
 During development the plugin can only reach `http://localhost:8000` (see `networkAccess` in the manifest).
 
@@ -138,14 +171,14 @@ Free Google fonts load automatically. For any other font (for example a paid fon
 | GET | `/v1/bundles/{id}/conversion` | Last conversion result |
 | GET | `/v1/bundles/{id}/output/{path}` | Live preview of the generated site |
 | GET | `/v1/bundles/{id}/fidelity/{path}` | Fidelity report and images |
-| GET | `/v1/bundles/{id}/code.zip` | Download the clean code (no internal attributes, corrections folded into classes) |
+| GET | `/v1/bundles/{id}/code.zip` | Download the clean code (no internal attributes, corrections folded into classes). `?format=wordpress&acf=free` or `&acf=pro` downloads the WordPress theme instead |
 | GET | `/v1/fonts` | Font families available for self-hosting |
 | PUT | `/v1/fonts/{family}/{filename}` | Upload a font file (max 15 MB) |
 
 ## Tests
 
 ```bash
-cd engine && uv run pytest && uv run ruff check . && uv run ruff format --check .
+cd engine && uv run pytest && uv run ruff check . && uv run ruff format --check .   # theme tests need `php`
 cd plugin && npm run typecheck && npm test && npm run build
 ```
 

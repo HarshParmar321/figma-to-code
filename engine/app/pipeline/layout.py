@@ -263,6 +263,44 @@ def page_container(page: Page) -> tuple[float, float]:
     return (W - width) / 2, width
 
 
+def apply_container(page: Page, container: tuple[float, float]) -> None:
+    """Puts each band section's content in the page container, or marks it as a composition (stage)."""
+    cl, cw = container
+    page.container = (cl, cw)
+    for sec in page.sections:
+        if sec.auto or len(sec.children) != 1 or sec.children[0].kind != "container":
+            continue
+        inner = sec.children[0]
+        if "band_box" not in inner.layout:
+            inner.layout["band_box"] = (inner.x, inner.w)  # its own extent, before any container
+        bx, bw = inner.layout["band_box"]
+        items = inner.children if inner.layout.get("mode") != "absolute" else [inner]
+        fits = inner.layout.get("mode") != "absolute" and all(c.x >= cl - 3 and c.right <= cl + cw + 3 for c in items)
+        inner.layout.pop("page_container", None)
+        sec.layout.pop("stage", None)
+        if fits:
+            # Content lives in the page container: positions become relative to its left edge.
+            inner.x, inner.w = cl, cw
+            inner.layout["page_container"] = True
+        else:
+            inner.x, inner.w = bx, bw
+            sec.layout["stage"] = True  # overlapping full-width composition: keep the design-width stage
+
+
+def share_container(pages: list[Page]) -> None:
+    """One content column for the whole site (the widest page's), so a section shared by several pages
+    is laid out the same way on every page (and can be one template part)."""
+    same_width = [p for p in pages if p.container]
+    if len(same_width) < 2:
+        return
+    for width in {round(p.width) for p in same_width}:
+        group = [p for p in same_width if round(p.width) == width]
+        widest = max(group, key=lambda p: p.container[1]).container
+        for p in group:
+            if p.container != widest:
+                apply_container(p, widest)
+
+
 def layout_page(page: Page) -> Page:
     snap_geometry(page)
     for sec in page.sections:
@@ -291,18 +329,5 @@ def layout_page(page: Page) -> Page:
             inner.kind = "container"
             sec.children = [inner]
             sec.layout = {"mode": "column"}
-    cl, cw = page_container(page)
-    page.container = (cl, cw)
-    for sec in page.sections:
-        if sec.auto or len(sec.children) != 1 or sec.children[0].kind != "container":
-            continue
-        inner = sec.children[0]
-        items = inner.children if inner.layout.get("mode") != "absolute" else [inner]
-        fits = inner.layout.get("mode") != "absolute" and all(c.x >= cl - 3 and c.right <= cl + cw + 3 for c in items)
-        if fits:
-            # Content lives in the page container: positions become relative to its left edge.
-            inner.x, inner.w = cl, cw
-            inner.layout["page_container"] = True
-        else:
-            sec.layout["stage"] = True  # overlapping full-width composition: keep the design-width stage
+    apply_container(page, page_container(page))
     return page

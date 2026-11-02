@@ -109,6 +109,14 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
+def landmarks(page: dict) -> str:
+    """Page body: the site header, <main> with the sections, then the site footer."""
+    head, sections, foot = page["parts"]
+    out = "".join(p + "\n" for p in head)
+    out += "  <main>\n" + "\n".join(sections) + "\n  </main>\n"
+    return out + "".join(p + "\n" for p in foot)
+
+
 @dataclass
 class Output:
     html: str
@@ -199,6 +207,8 @@ class Generator:
                 sec.role = f"section-{i + 1}"
             if sec.component:
                 sec.role = sec.component
+            if sec.role == "site-header" and i == 0 and sec.h <= 200:
+                sec.tag = sec.tag or "header"  # the thin top band shared by every page is the site header
             sec.tag = sec.tag or ("footer" if sec.role in ("footer", "site-footer") else "section")
             for e in sec.walk():
                 if e.kind == "box" and self._is_button(e):
@@ -903,7 +913,13 @@ class Generator:
                     t.tag, t.role = "a", "link"
                 if sec is page.sections[0] and sec.h <= 160 and sec.tag in (None, "section"):
                     sec.tag = "header"  # a thin top band holding the menu is the site header
-                elif parent is not None and parent.kind == "wrapper" and parent.y < 240 and parent.tag is None:
+                elif (
+                    sec.tag != "header"
+                    and parent is not None
+                    and parent.kind == "wrapper"
+                    and parent.y < 240
+                    and parent.tag is None
+                ):
                     parent.tag = "header"
             for c in e.children:
                 visit(c, e, sec)
@@ -1786,12 +1802,20 @@ class Generator:
             (role, fpage, bp.expectations(self.expect, page, fpage, matches[role]))
             for role, fpage in (frames or {}).items()
         ]
+        # Landmarks: a leading <header> and a trailing <footer> sit outside <main>.
+        lead = 1 if len(body_parts) > 1 and body_parts[0].lstrip().startswith("<header") else 0
+        tail = 1 if len(body_parts) > lead + 1 and body_parts[-1].lstrip().startswith("<footer") else 0
         return {
             "name": page.name,
             "file": filename,
             "frame": page.frame,
             "title": page.root.name,
             "body": "\n".join(body_parts),
+            "parts": (
+                body_parts[:lead],
+                body_parts[lead : len(body_parts) - tail],
+                body_parts[len(body_parts) - tail :],
+            ),
             "expectations": self.expect,
             "width": page.width,
             "height": page.height,
@@ -1853,7 +1877,7 @@ class Generator:
             "a { color: inherit; }\n"
             "nav ul { list-style: none; margin: 0; padding: 0; }\n"
             "nav a { text-decoration: none; }\n"
-            "main { overflow-x: clip; }\n"
+            "body > header, main, body > footer { overflow-x: clip; }\n"
             "[id] { scroll-margin-top: 24px; }\n\n"
             "/* Layout */\n"
             ".container { width: min(100% - 2 * var(--gutter), var(--container)); margin-inline: auto; }"
@@ -1900,7 +1924,7 @@ class Generator:
                 f"  <title>{html.escape(p['name'])} · {site}</title>\n{font_link}"
                 '  <link rel="stylesheet" href="css/styles.css">\n'
                 '  <link rel="stylesheet" href="css/corrections.css">\n'
-                f"</head>\n<body{bg}>\n  <main>\n{p['body']}\n  </main>\n</body>\n</html>\n"
+                f"</head>\n<body{bg}>\n{landmarks(p)}</body>\n</html>\n"
             )
             (out_dir / p["file"]).write_text(doc, encoding="utf-8")
             docs.append(doc)
@@ -1960,7 +1984,7 @@ def generate_site(
     out = gen.finish(out_dir, results)
     out.frame_checks = gen.frame_checks
     meta = {
-        "pages": [{k: v for k, v in r.items() if k not in ("body",)} for r in results],
+        "pages": [{k: v for k, v in r.items() if k not in ("body", "parts")} for r in results],
         "components": out.components,
         "fonts": out.fonts,
         "assumptions": out.assumptions,

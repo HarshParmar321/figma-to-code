@@ -110,6 +110,17 @@ figma.ui.onmessage = async (msg: UiToMain) => {
     }
   } else if (msg.type === 'open-url') {
     if (/^https?:\/\//.test(msg.url)) figma.openExternal(msg.url);
+  } else if (msg.type === 'select-all-frames') {
+    // Every page of the site in one click: top-level frames, plus frames grouped in Figma sections.
+    const picked: SceneNode[] = [];
+    for (const node of figma.currentPage.children) {
+      if (!node.visible) continue;
+      if (FRAME_TYPES.has(node.type)) picked.push(node);
+      else if (node.type === 'SECTION') picked.push(...node.children.filter((c) => c.visible && FRAME_TYPES.has(c.type)));
+    }
+    figma.currentPage.selection = picked;
+    if (picked.length) figma.viewport.scrollAndZoomIntoView(picked);
+    sendSelection();
   } else if (msg.type === 'select-node') {
     const node = await figma.getNodeByIdAsync(msg.nodeId);
     if (node && 'visible' in node) {

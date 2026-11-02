@@ -89,4 +89,5 @@ export type MainToUi =
 export type UiToMain =
   | { type: 'export'; roles: Record<string, FrameRole> }
   | { type: 'select-node'; nodeId: string }
+  | { type: 'select-all-frames' }
   | { type: 'open-url'; url: string };

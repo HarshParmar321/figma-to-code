@@ -100,13 +100,28 @@ Results: cleaning page 99.9 fidelity with **0 corrections on the first render**,
 
 Results: desktop fidelity unchanged on every real design (cleaning 99.9 with 0 corrections; Peachy Pup and services capped by the TT Hoves font); Auto Layout sample: quality 100, phone layout 11/15 elements against its mobile frame (the misses are the fixture's synthetic text boxes). 97 engine tests.
 
+## v0.7: WordPress theme export
+
+| Area | How it works |
+| --- | --- |
+| **Input** (`wordpress.py`) | The clean site from `export.clean_site` (instruments removed, corrections folded into `main.css`). `build_theme(out_dir, conversion, acf, reference)` returns the theme as `{path: bytes}`; `GET /code.zip?format=wordpress&acf=free|pro` zips it on demand. |
+| **Parts** | Each page's `<body>` is read in order: landmarks before `<main>` (head), sections inside it (main), landmarks after it (foot). A section with `data-component` becomes `template-parts/components/<name>.php` (scope global); the others are `template-parts/sections/<page>/<id>.php` (scope page). A component that is first / last on every page and outside `<main>` goes to `header.php` / `footer.php`. |
+| **Converter** | Walks a section's DOM and writes PHP with the same markup: the main menu → `wp_nav_menu` (walker-free, classes via `nav_menu_link_attributes`) with the design's links as fallback; `images/img-*` → image field (`f2c_image`); `a` → link field (URL, label, target); text-only elements → text / textarea fields; grids of identical items (`l-grid-N`) → a repeater (`f2c_items` + `foreach`); `form` → `admin-post.php` + nonce. Field names are semantic (`hero_title`, `services_cards`, `…_button`). |
+| **Defaults** | Every helper takes the design's value as default (`f2c_field`, `f2c_link`, `f2c_items`): with ACF missing or a field empty, the template outputs exactly the design's markup. |
+| **ACF free** | Repeaters become numbered fields (`cards_1_title`…); one group per page (`page_type == front_page` / `page_template == templates/page-x.php`) with a tab per section; global fields on the front page (`f2c_global_id()` = `page_on_front`). |
+| **ACF Pro** | `page_sections` Flexible Content on every page: one layout per main section of the site (`$GLOBALS['f2c_layouts']` maps layout → template part, rendered by `f2c_sections()`); Repeaters; global fields on the `f2c-site-settings` options page (`f2c_global_id()` = `'option'`). On activation the rows are filled from the design's page order. |
+| **Activation** | `after_switch_theme`: pages created with their templates, front page set, Pro rows written with `update_field`, the "Main menu" built and assigned. |
+| **Shared container** (`layout.share_container`) | Pages of the same width use the widest page's container (`apply_container`), so a shared section is laid out identically everywhere and becomes one template part. |
+| **Landmarks** (`generate.landmarks`) | A leading `<header>` and a trailing `<footer>` are written outside `<main>`; the shared first section of every page (≤ 200px) is tagged `<header>`. `overflow-x: clip` now applies to `body > header, main, body > footer`. |
+| **Tests** (`tests/test_wordpress.py`) | `php -l` on every PHP file; `tests/php/wp_stub.php` stands in for the WordPress / ACF functions (`get_field`, `have_rows`, `get_row_layout`…, driven by JSON) and `tests/wp_render.py` renders a template and compares its `<body>` with the clean HTML token by token. |
+
+Results: all four real designs (cleaning, services, Peachy Pup, two-page site), ACF free and Pro: identical markup and pixel-identical screenshots; fidelity and code quality unchanged. 102 engine tests.
+
 ## Known limits (next steps)
 
-1. **Mobile frames:** read and paired with their page, but not yet merged into media queries (desktop/mobile element matching, FR-EXT-14). This is the next major step.
-2. **Inferred mobile layout** is basic (rows stack, grids go to one column below 768 px). Background layers keep their desktop height and composition sections (overlapping layers) do not reflow on phones yet (v0.6).
-3. **Interactions and motion:** hover variants, Smart Animate and the Motion panel are not generated yet (FR-MOT).
-4. **Visual (non-geometry) fixes:** the loop corrects positions and sizes; wrong colours, effects or fonts are reported but not yet auto-fixed.
-5. **Semantics:** form fields drawn as rectangles stay `div`s; heading levels are inferred from size.
-6. **Real files tested:** two flat landing pages and a large illustrated page (Peachy Pup). Still needed: a file built with Auto Layout and components, and one with a mobile frame.
-7. **Forms:** input fields drawn as rectangles are still `div`s (detection planned).
-8. **Between 768 px and the content width** the page scales like browser zoom (stepped every 32 px) rather than reflowing; a supplied tablet frame will replace this once breakpoint merging lands.
+1. **WordPress:** not yet run on a real WordPress install (checked with `php -l` and the stub harness). No Gutenberg blocks or `theme.json` yet.
+2. **Mobile frames:** merged into media queries (v0.6), but only tested on the sample; mobile-only layers are not generated.
+3. **Compositions** (overlapping layers) reflow into a plain column on phones without a mobile frame, and scale like zoom between 768 px and the content width.
+4. **Interactions and motion:** hover variants, prototype links, Smart Animate and the Motion panel are not generated yet (v0.8 / v0.9).
+5. **Visual (non-geometry) fixes:** the loop corrects positions and sizes; wrong colours, effects or fonts are reported but not yet auto-fixed.
+6. **Real files tested:** two flat landing pages, a large illustrated page (Peachy Pup) and a two-page site. Still needed: a file built with Auto Layout and components, and one with mobile frames.

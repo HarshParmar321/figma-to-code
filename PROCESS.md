@@ -6,20 +6,20 @@ The goal is a product people choose over existing Figma-to-code tools. Any Figma
 2. **is clean and maintainable**, written the way a front-end developer would write it,
 3. **works on every screen**, from phone to tablet to laptop to wide monitor,
 4. **reuses** headers, footers and repeated sections instead of duplicating them,
-5. later, **becomes a WordPress theme** (PHP + ACF) from the same HTML.
+5. can also be downloaded as a **WordPress theme** (PHP templates + ACF or ACF Pro) built from the same HTML.
 
 Every conversion proves itself with two scores: **fidelity** (does it match Figma?) and **code quality** (is the code clean, and does it hold up at other screen sizes?).
 
 ---
 
-## Current status: v0.6
+## Current status: v0.7
 
 | Real design | Layers | Fidelity at design width | Elements in place | Code quality |
 | --- | --- | --- | --- | --- |
 | Cleaning landing page | 179 | **99.9** (correct on the first render, 0 corrections) | 88 / 88 | **94** Excellent |
-| Moving services page | ~500 | 69\* | 76 / 83 | **92** Excellent |
-| Peachy Pup Bakery | 10,949 | 69\* (section similarity 98 / 95 / 95 / 100%) | 91 / 94 | **84** Good |
-| Two-page test site | 2 × 179 | **99.1** | shared header, footer and 2 sections | **88** Good |
+| Moving services page | ~500 | 69\* | 76 / 83 | **95** Excellent |
+| Peachy Pup Bakery | 10,949 | 69\* (section similarity 98 / 95 / 95 / 100%) | 91 / 94 | **87.5** Good |
+| Two-page test site | 2 × 179 | **99.1** | shared header, footer and 2 sections | **91** Excellent |
 | Sample (Auto Layout + mobile frame) | 34 | desktop 12 / 15 · **phone 11 / 15** (checked against the mobile frame)† | | **100** Excellent |
 
 \* Capped at 69 because the paid font **TT Hoves** is not installed. Every missed element on these two pages is TT Hoves text. Once the font files are uploaded, the score is expected to be in the high 90s.
@@ -27,7 +27,8 @@ Every conversion proves itself with two scores: **fidelity** (does it match Figm
 † The sample's text boxes are synthetic (widths that no real font produces); every miss on desktop and phone is one of those boxes.
 
 - **Speed:** Peachy Pup (10,949 layers) converts and checks in about 15 seconds. Before v0.4 the check never finished.
-- **Tests:** 97 engine tests and 9 plugin tests, plus lint and format checks in CI.
+- **WordPress theme:** on all four real designs, in both ACF modes, the theme renders the same markup as the checked HTML and its screenshots are pixel-identical.
+- **Tests:** 102 engine tests and 9 plugin tests, plus lint and format checks in CI.
 
 ---
 
@@ -118,6 +119,39 @@ Every conversion proves itself with two scores: **fidelity** (does it match Figm
 - **Forms:** two or more equal drawn inputs in a column plus a button become `<form>`, `<input>` / `<textarea>` (type from the placeholder: email, tel, url…) and `<button type="submit">`. They get `font: inherit`, the placeholder style and aria-labels.
 - **Fixes:** containers inside composition sections no longer subtract the gutter at full width (this caused uniform -24px corrections), and identical icons in different frames are matched by content hash.
 
+### v0.7: WordPress theme export (ACF and ACF Pro)
+
+- **Two downloads from one conversion:** in the plugin, choose **Clean HTML and CSS**, **WordPress theme · ACF** or **WordPress theme · ACF Pro**. The theme is built from the same clean HTML that passed the design check, so it looks exactly like it.
+- **A classic PHP theme, the WordPress way:**
+  - `header.php` / `footer.php` hold the shared site header and footer
+  - `front-page.php` for the first page and `templates/page-<slug>.php` (with a Template Name) for each other page
+  - each section is a template part in `template-parts/sections/<page>/`
+  - sections shared by several pages are one file in `template-parts/components/`, so they are edited once
+  - `page.php` / `index.php` for any other page or post, plus `style.css`, `functions.php`, `screenshot.png` and `readme.txt`
+- **Everything is editable, and nothing breaks without ACF:**
+  - every text, image, button / link and repeated card is a field
+  - each field shows the design's content until it is filled in, so the site looks like the design right after activation, even before ACF is installed
+- **ACF (free):** one field group per page with a tab per section, numbered fields for repeated cards, and shared sections edited once on the front page.
+- **ACF Pro:**
+  - **Page sections** (Flexible Content): every section of the design is a layout that can be added, removed or reordered on any page
+  - repeated cards become **Repeaters**
+  - shared sections are edited in a **Site settings** options page
+- **Set up on activation:** the design's pages are created with their templates, the first one becomes the front page, the Pro section rows are filled in, and the "Main menu" is built from the design's links (`wp_nav_menu`, with the design's links as the fallback).
+- **WordPress plumbing:**
+  - field groups as ACF local JSON (`acf-json/`), so they can be synced and versioned
+  - escaping everywhere (`esc_html`, `esc_url`, `wp_kses_post`)
+  - images through `wp_get_attachment_image`
+  - forms post to `admin-post.php` with a nonce and send the message with `wp_mail`
+  - fonts and styles are enqueued properly
+- **Better landmarks in both outputs:** the shared site header and footer now sit outside `<main>` (`<header>`, `<main>`, `<footer>`). The top band shared by every page is a `<header>` even without a menu.
+- **One content column for the whole site:** pages of the same width share the widest page's container, so a shared section has identical markup on every page and can be one template part.
+- **Plugin:** a **Select all frames on this page** button (frames inside Figma sections too), so a 10-page site is one click.
+- **Checked without a WordPress install:**
+  - every generated PHP file passes `php -l`
+  - a small stand-in for the WordPress and ACF functions renders each template
+  - the result matches the clean HTML tag for tag (with ACF missing, with empty fields and with edited fields)
+  - screenshots of both are pixel-identical
+
 Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-v0.2.md).
 
 ---
@@ -132,14 +166,22 @@ Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-
 - [ ] Between 768px and the content width, composition sections still scale down like browser zoom instead of reflowing.
 - [ ] Corrections are applied on desktop only; corrections measured against the mobile frame are next.
 
-### v0.7: navigation and interactions
+### WordPress follow-ups
+
+- [ ] Install the theme on a **real WordPress** site (with ACF and with ACF Pro) and click through the editor; so far it is checked with `php -l` and a stand-in for the WordPress functions.
+- [ ] Gutenberg blocks (ACF blocks or native block patterns) as a third option, and a block theme (`theme.json`) for full-site editing.
+- [ ] Footer menu, social links and copyright as Site settings; SEO title / description per page.
+- [ ] Blog templates (archive, single post) styled like the design, when the design has them.
+- [ ] A contact form plugin option (Contact Form 7 / WPForms markup) next to the built-in handler.
+
+### v0.8: navigation and interactions
 
 - [ ] Figma prototype links: "navigate to" becomes a page link, "scroll to" becomes an anchor, and overlays become pop-ups.
 - [ ] A sticky header when the header is set to fixed position in Figma.
 - [ ] **Hover, focus and pressed states** from component variants (State = Hover…) and hover interactions, with transitions.
-- [ ] A hamburger menu on phones when the design has one or the menu doesn't fit.
+- [ ] A hamburger menu on phones when the design has one or the menu doesn't fit (the first JavaScript in the output, also in the theme).
 
-### v0.8: motion and complex CSS
+### v0.9: motion and complex CSS
 
 - [ ] Smart Animate becomes CSS transitions, plus scroll-in animations (tiny JavaScript that respects "reduce motion").
 - [ ] Tabs, accordions and carousels from interactive components.
@@ -148,7 +190,6 @@ Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-
 
 ### v1.5 and later
 
-- [ ] **WordPress theme export** (PHP templates + ACF fields) from the same HTML.
 - [ ] A Tailwind CSS output option, a code preview inside the plugin, and regenerating one section at a time.
 - [ ] Hosted Engine (accounts, storage, billing) so users don't run it locally.
 
@@ -166,5 +207,6 @@ Technical details for each version are in [docs/pipeline-v0.2.md](docs/pipeline-
 
 - Without the real font files, text measures slightly differently and the score is capped (this is intentional).
 - Phones without a mobile frame get an inferred layout. Normal sections reflow well; sections built from overlapping layers become a plain vertical flow that is readable but not designed.
-- Hover states, animations and the WordPress export are not generated yet.
+- Hover states and animations are not generated yet.
+- The WordPress theme has not been run on a real WordPress install yet (see WordPress follow-ups).
 - The live preview carries `data-figma-id` attributes for the check; the downloaded code does not.

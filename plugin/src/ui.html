@@ -57,13 +57,19 @@
   .font-row span { font-weight: 600; min-width: 90px; }
   .font-row input { flex: 1; border: none; padding: 0; }
   .score.small b { font-size: 22px; }
+  .download { display: grid; gap: 6px; margin: 6px 0 8px; }
+  .download label { display: flex; gap: 6px; align-items: baseline; }
+  .download .note { margin: 0; }
+  .frames-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  button.link { flex: none; background: none; border: 0; padding: 0; width: auto; color: var(--figma-color-text-brand, #0d99ff); cursor: pointer; font: inherit; font-size: 11px; }
+  button.link:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
   <h1>Figma to Code</h1>
   <p class="hint">Select one desktop frame per page (Home, About…) and their mobile frames if you have them, then convert. Keep all frames on the same Figma page.</p>
 
-  <h2>Selected frames</h2>
+  <div class="frames-head"><h2>Selected frames</h2><button id="select-all" class="link" title="Selects every top-level frame on this Figma page (frames inside sections too)">Select all frames on this page</button></div>
   <div id="frames"><div class="empty">Select one or more frames on the canvas.</div></div>
   <div id="ignored" class="hint"></div>
 

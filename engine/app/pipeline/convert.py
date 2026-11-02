@@ -17,7 +17,7 @@ from .components import detect_shared_sections, split_shared_strips
 from .fidelity import Renderer, verify, write_compare_images, write_report_html, write_site_report
 from .generate import generate_site
 from .ir import build_pages, site_pages
-from .layout import layout_page
+from .layout import layout_page, share_container
 
 MAX_ROUNDS = 6
 CHECK_BUDGET_S = 120.0  # correction rounds stop after this much checking time (per conversion)
@@ -77,6 +77,7 @@ def convert(
     say("Building layout")
     for p in pages:
         layout_page(p)
+    share_container(pages)
     for g in groups:
         for role_name in ("tablet", "mobile"):
             if g.get(role_name) is not None and g[role_name] is not g["desktop"]:

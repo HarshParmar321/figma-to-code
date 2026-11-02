@@ -170,6 +170,8 @@ interface Conversion {
   previewUrl: string;
   reportUrl: string;
   zipUrl: string;
+  themeUrl?: string;
+  themeProUrl?: string;
   assumptions: string[];
   warnings: string[];
   fidelity: null | {
@@ -260,7 +262,14 @@ function renderResult(r: Conversion) {
        <div class="row"><button id="fonts-reconvert">Upload fonts and convert again</button></div></div>`
     : '';
   resultEl.innerHTML = `<div class="result">${scoreHtml}
-    <div class="row"><button id="open-preview">Open preview</button><button id="open-report" class="secondary">Report</button><button id="get-code" class="secondary">Download code</button></div>
+    <div class="row"><button id="open-preview">Open preview</button><button id="open-report" class="secondary">Report</button></div>
+    <h2>Download</h2>
+    <div class="download">
+      <label><input type="radio" name="fmt" value="html" checked> Clean HTML and CSS <span class="note">static site (no JavaScript needed yet)</span></label>
+      <label><input type="radio" name="fmt" value="wp"> WordPress theme · ACF <span class="note">free plugin</span></label>
+      <label><input type="radio" name="fmt" value="wp-pro"> WordPress theme · ACF Pro <span class="note">page builder sections, repeaters, site settings</span></label>
+    </div>
+    <div class="row"><button id="get-code">Download code</button></div>
     ${pagesHtml}${framesHtml}${fontsHtml}${qualityHtml}${notes}${issues}</div>`;
   resultEl.querySelectorAll<HTMLElement>('a[data-page]').forEach((a) => {
     a.onclick = (ev) => {
@@ -272,7 +281,12 @@ function renderResult(r: Conversion) {
   if (missing.length) $('fonts-reconvert').onclick = () => run(() => uploadFontsAndReconvert(r.bundleId));
   $('open-preview').onclick = () => send({ type: 'open-url', url: r.previewUrl });
   $('open-report').onclick = () => send({ type: 'open-url', url: r.reportUrl });
-  $('get-code').onclick = () => send({ type: 'open-url', url: r.zipUrl });
+  $('get-code').onclick = () => {
+    const fmt = (resultEl.querySelector<HTMLInputElement>('input[name="fmt"]:checked') ?? { value: 'html' }).value;
+    const url = fmt === 'wp' ? (r.themeUrl ?? `${r.zipUrl}?format=wordpress&acf=free`)
+      : fmt === 'wp-pro' ? (r.themeProUrl ?? `${r.zipUrl}?format=wordpress&acf=pro`) : r.zipUrl;
+    send({ type: 'open-url', url });
+  };
   if (f) {
     resultEl.querySelectorAll<HTMLElement>('.finding').forEach((el) => {
       const id = f.topIssues[Number(el.dataset.idx)].id;
@@ -346,6 +360,8 @@ async function run(task: () => Promise<void>) {
     updateButtons();
   }
 }
+
+$('select-all').onclick = () => send({ type: 'select-all-frames' });
 
 convertBtn.onclick = () => run(async () => {
   resultEl.innerHTML = '';

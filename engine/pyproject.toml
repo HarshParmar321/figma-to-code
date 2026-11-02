@@ -39,5 +39,6 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
-# The fidelity report is an embedded HTML/CSS template.
+# Embedded templates keep their own line lengths: the fidelity report (HTML/CSS), the theme (PHP).
 "app/pipeline/fidelity.py" = ["E501"]
+"app/pipeline/wordpress.py" = ["E501"]
