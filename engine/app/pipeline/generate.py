@@ -767,8 +767,11 @@ class Generator:
                 self._ctx.append("layer")
                 self._auto.append(False)
                 for layer in sorted(e.layers, key=lambda x: x.z):
+                    clickable = any(x.tag in ("a", "button", "nav") or x.link for x in layer.walk())
                     if e.kind == "section" and not stage:
                         lp = self.anchored_css(layer, e)
+                        if clickable and id(layer) not in self._bg:
+                            lp["z-index"] = "2"  # a floating menu or button stays on top, so it can be clicked
                         parts.append(self.render(layer, lp, depth + 1))
                         continue
                     full = e.kind == "section" and self._full_bleed(layer)
@@ -884,7 +887,9 @@ class Generator:
         bleed_done = placement.pop("__bleed_done__", None) if "__bleed_done__" in placement else None
         mobile = dict(placement.pop("__mobile__", None) or {})
         main.update(placement)
-        if id(e) in self._bg:
+        if placement.get("z-index") == "2":
+            pass  # a clickable floating layer: kept on top
+        elif id(e) in self._bg:
             main["z-index"] = "-1"
         elif id(e) in self._stack:
             # Overlaps something outside its own box: paint exactly where Figma paints it.
