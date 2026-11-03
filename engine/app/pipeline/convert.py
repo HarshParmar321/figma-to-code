@@ -52,6 +52,7 @@ def convert(
 ) -> dict:
     say = progress or (lambda _msg: None)
     started = time.time()
+    original = bundle  # untouched (a second pass starts from it)
     asset_hashes = dict(asset_hashes or {})
     assets = {a["id"]: a for a in bundle["assets"]}
     # Content hashes for any asset the caller did not hash (same bytes = same image in every frame).
@@ -137,6 +138,7 @@ def convert(
         try:
             with Renderer(chromium_path) as renderer:
                 fixes: dict[str, dict] = {}
+                phone_fixes: dict[str, dict] = {}
                 check_start = time.monotonic()
                 for i, (p, file, gp) in enumerate(zip(pages, files, gen.pages, strict=True)):
                     ref = _reference(bundle_dir, p.frame, assets)
@@ -156,7 +158,7 @@ def convert(
                         if final or not corr.step(fid["measurements"], fixes):
                             break
                         rounds += 1
-                        corr.write(out_dir, fixes)
+                        corr.write(out_dir, fixes, phone_fixes)
                     if not renderer.ready:
                         result["warnings"].append(f"{p.name}: some images or fonts took over 20 s to load.")
                     if time.monotonic() - check_start > CHECK_BUDGET_S:
@@ -173,10 +175,22 @@ def convert(
                             continue
                         say(f"Checking {label} on {frame_role} against the {frame_role} frame")
                         fdir = pdir / frame_role
-                        ffid = verify(out_dir, fdir, fpage, fexp, fref, renderer=renderer, html_file=file)
+                        ffid = None
+                        for rnd in range(max_rounds + 1):
+                            ffid = verify(out_dir, fdir, fpage, fexp, fref, renderer=renderer, html_file=file)
+                            # Phones get their own correction rounds, measured against the mobile frame.
+                            over = time.monotonic() - check_start > CHECK_BUDGET_S
+                            if frame_role != "mobile" or rnd == max_rounds or over:
+                                break
+                            if not corr.step(ffid["measurements"], phone_fixes):
+                                break
+                            say(f"Checking {label} on {frame_role} (correction round {rnd + 1})")
+                            corr.write(out_dir, fixes, phone_fixes)
                         write_compare_images(fref, fdir / "render.png", fdir)
                         title = f"{p.name} ({frame_role}) · {bundle['source'].get('fileName', 'Design')}"
                         write_report_html(ffid, fdir, title, preview_href="../" + back + file)
+                        if frame_role == "mobile":
+                            gen._last_phone = {**getattr(gen, "_last_phone", {}), file: ffid["measurements"]}
                         breakpoint_results.setdefault(file, {})[frame_role] = {
                             k: ffid[k] for k in ("score", "band", "subScores", "counts", "sections", "missingFonts")
                         } | {"topIssues": ffid["issues"][:10], "width": fpage.width,
@@ -252,6 +266,55 @@ def convert(
     result["zip"] = "code.zip"
     result["frame"] = pages[0].role if pages else role
     result["seconds"] = round(time.time() - started, 2)
+
+    # Phone layout measured against the mobile frame: sections that came out wrong are rebuilt from the
+    # mobile frame itself (shown on phones only), then everything is generated and checked once more.
+    split = _sections_to_rebuild(pages, page_results, gen, result)
+    if split and not bundle.get("_split_pass"):
+        say("Rebuilding the phone layout of some sections from the mobile frame")
+        again = dict(original)
+        again.pop("_interactions", None)
+        again["_split_sections"] = set(original.get("_split_sections") or set()) | split
+        again["_split_pass"] = True
+        second = convert(again, bundle_dir, font_dir, chromium_path, run_verify, role, asset_hashes, progress,
+                         max_rounds)  # fmt: skip
+        score = lambda r, key: (r.get(key) or {}).get("score", 0)  # noqa: E731
+        first_m, second_m = score(result, "mobile"), score(second, "mobile")
+        first_d, second_d = score(result, "fidelity"), score(second, "fidelity")
+        if second_m >= first_m and second_d >= first_d - 1.5:
+            second["seconds"] = round(time.time() - started, 2)
+            (bundle_dir / "conversion.json").write_text(json.dumps(second, indent=2, default=str), encoding="utf-8")
+            return second
+        # The first layout was better: generate it again (the output folder holds the second one now).
+        back = dict(original)
+        back.pop("_interactions", None)
+        back["_split_pass"] = True
+        return convert(back, bundle_dir, font_dir, chromium_path, run_verify, role, asset_hashes, progress, max_rounds)
     (bundle_dir / "conversion.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
     say("Done")
     return result
+
+
+def _sections_to_rebuild(pages, page_results, gen, result) -> set[str]:
+    """Desktop sections (ids) whose elements are off on the phone check (fewer than 90% in place)."""
+    if not (result.get("mobile") or {}).get("score") or result["mobile"]["score"] >= 97:
+        return set()
+    out: set[str] = set()
+    for p, file, *_ in page_results:
+        meas = getattr(gen, "_last_phone", {}).get(file) or {}
+        owner: dict[str, str] = {}
+        for sec in p.sections:
+            for e in sec.walk():
+                if e.node is not None:
+                    owner.setdefault(e.node["id"], sec.id)
+            owner[f"section:{p.frame.get('rootId', 'page')}:{sec.id}"] = sec.id
+        tally: dict[str, list[int]] = {}
+        for nid, m in meas.items():
+            sid = owner.get(nid)
+            if sid is None:
+                continue
+            t = tally.setdefault(sid, [0, 0])
+            t[0] += 1 if m["ok"] else 0
+            t[1] += 1
+        out |= {sid for sid, (ok, n) in tally.items() if n and ok / n < 0.9}
+    return out

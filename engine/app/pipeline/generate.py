@@ -196,6 +196,9 @@ class Generator:
         self._phone_menus: dict[str, tuple] = {}  # header component -> menu icon from a mobile frame
         self._frame_derived: dict[tuple, tuple] = {}  # (page, role) -> (match, media CSS by element)
         self._component_frame_css: dict[str, dict] = {}  # component -> role -> (walk size, {index: css})
+        self._phone_plan: dict[int, tuple] = {}  # page -> (mobile Page, {desktop section: [mobile sections]})
+        self._phone_expect: dict[int, list] = {}  # page -> expectations of its phone-only sections
+        self._phone_ready: set[int] = set()
         self.overlay_css: dict[str, str] = {}  # dialog class -> extra CSS (backdrop, animation)
 
     def _expect(self, item: dict) -> None:
@@ -336,7 +339,7 @@ class Generator:
         # Exported SVG/PNG layers already carry the layer's own opacity (Figma bakes it in).
         if isinstance(op, (int, float)) and op < 0.999 and e.kind not in ("svg", "raster"):
             d["opacity"] = f"{op:.3g}"
-        if e.kind == "box" and e.asset:
+        if e.kind in ("box", "section") and e.asset:
             crop = self.image_crop(e)
             d["background-image"] = f"url('../images/{self.image_file(e.asset, e.w, e.h, crop)}')"
             image_fills = [p for p in n.get("fills") or [] if isinstance(p, dict) and p.get("type") == "IMAGE"]
@@ -413,6 +416,9 @@ class Generator:
         """
         mode = parent.layout.get("mode", "column")
         pt, pr, pb, pl = pad
+        if parent.kind == "box":  # the content box starts inside the border (padding absorbed the stroke)
+            bt, br, bb, bl = border_widths(parent.node or {})
+            pt, pr, pb, pl = pt + bt, pr + br, pb + bb, pl + bl
         per_child: list[dict] = [{} for _ in children]
         if mode == "absolute":
             d = {"position": "relative", "width": px(parent.w), "height": px(parent.h), "__ctx__": "absolute"}
@@ -732,7 +738,24 @@ class Generator:
                 vertical_fixed = n.get("layoutSizingVertical") == "FIXED" or (
                     n.get("layoutMode") == "VERTICAL" and n.get("primaryAxisSizingMode") == "FIXED")  # fmt: skip
                 if vertical_fixed and e.kind != "section" and children:
-                    box_css["min-height"] = px(e.h)
+                    # A clipping frame with a fixed height really is that tall (a closed dropdown stays
+                    # closed); otherwise the height is a minimum and the content may grow.
+                    box_css["height" if n.get("clipsContent") else "min-height"] = px(e.h)
+                scroll = n.get("overflowDirection") if n.get("clipsContent") else None
+                if scroll in ("HORIZONTAL", "BOTH") and children:
+                    # "Scroll horizontally" in Figma: a swipeable row that snaps item by item.
+                    box_css.update({"overflow-x": "auto", "overflow-y": "hidden", "scroll-snap-type": "x mandatory",
+                                    "scrollbar-width": "none", "-webkit-overflow-scrolling": "touch",
+                                    "flex-wrap": "nowrap"})  # fmt: skip
+                    if pad[3]:
+                        box_css["scroll-padding-left"] = px(pad[3])  # snapping keeps the frame's padding
+                    box_css.pop("overflow", None)
+                    for c, cd in zip(children, per_child, strict=True):
+                        if (c.node or {}).get("layoutPositioning") != "ABSOLUTE":
+                            cd.update({"flex": f"0 0 {px(c.w)}", "scroll-snap-align": "start", "min-width": "0"})
+                elif scroll == "VERTICAL" and children:
+                    box_css.update({"overflow-y": "auto", "overflow-x": "hidden", "height": px(e.h)})
+                    box_css.pop("overflow", None)
                 if e.kind == "section":
                     main["min-height"] = px(e.h)
                 child_ctx = flow.pop("__ctx__", "column")
@@ -909,6 +932,9 @@ class Generator:
         else:
             mobile = {}
         mobile.update(self.frame_css.get(id(e), {}).get(MOBILE_Q, {}))
+        if e.layout.get("only_mobile"):
+            mobile["display"] = main.get("display", "block")  # the mobile frame's own section: phones only
+            main["display"] = "none"
         if mobile:
             css[MOBILE_Q] = mobile
         tablet = self.frame_css.get(id(e), {}).get(TABLET_Q)
@@ -1629,7 +1655,10 @@ class Generator:
         key = (id(page), role)
         if key not in self._frame_derived:
             mt = bp.match(page, fpage, self.asset_hashes)
+            hidden = self.plan_phone_sections(page, fpage, mt) if role == "mobile" else []
             derived = bp.derive_css(page, fpage, mt)
+            for sec in hidden:
+                derived[id(sec)] = {"display": "none"}  # replaced by the mobile frame's own section
             self._frame_derived[key] = (mt, derived)
             for sec in page.sections:
                 if not sec.component or role in self._component_frame_css.get(sec.component, {}):
@@ -1640,13 +1669,136 @@ class Generator:
                     self._component_frame_css.setdefault(sec.component, {})[role] = (len(els), by_index)
         return self._frame_derived[key]
 
+    @staticmethod
+    def _leaves(e: El) -> list[El]:
+        return [x for x in e.walk() if x.kind in bp.LEAVES]
+
+    @staticmethod
+    def _frame_names(e: El) -> set[str]:
+        return {x.name.lower() for x in e.walk() if x is not e and x.kind in ("box", "image") and x.name}
+
+    def plan_phone_sections(self, page: Page, mobile: Page, mt) -> list[El]:
+        """Section by section: where the mobile frame only rearranges the desktop section, media
+        queries adapt it (one block of code). Where it is a different design (another header, another
+        mockup, different blocks), the mobile frame's own section is generated, shown on phones only,
+        and the desktop section is hidden there. Returns the desktop sections hidden on phones."""
+        # Pair sections in order (same layer name first, else where the content went); a pairing
+        # never goes back up the mobile page.
+        index = {id(m): i for i, m in enumerate(mobile.sections)}
+        partner: dict[int, El] = {}
+        used: set[int] = set()
+        last = -1
+        for d in page.sections:
+            name = (d.name or "").lower()
+            m = next((x for x in mobile.sections[last + 1 :] if (x.name or "").lower() == name), None)
+            if m is None:
+                v = mt.sections.get(id(d))
+                m = v if v is not None and index[id(v)] > last else None
+            if m is not None and id(m) not in used:
+                partner[id(d)] = m
+                used.add(id(m))
+                last = index[id(m)]
+        reverse = {id(v): k for k, v in mt.pairs.items()}
+        plan: dict[int, list[El]] = {}
+        hidden: list[El] = []
+        for d in page.sections:
+            m = partner.get(id(d))
+            if m is None:
+                hidden.append(d)  # not in the mobile design at all
+                continue
+            d_ids = {id(x) for x in d.walk()}
+            m_ids = {id(y) for y in m.walk()}
+            d_leaves, m_leaves = self._leaves(d), self._leaves(m)
+            cov_m = sum(1 for x in m_leaves if reverse.get(id(x)) in d_ids) / max(1, len(m_leaves))
+            cov_d = sum(1 for x in d_leaves if id(x) in mt.pairs and id(mt.pairs[id(x)]) in m_ids) / max(
+                1, len(d_leaves)
+            )
+            nd, nm = self._frame_names(d), self._frame_names(m)
+            jacc = len(nd & nm) / max(1, len(nd | nm)) if (nd or nm) else 1.0
+            force = self.bundle.get("_split_sections")
+            same = cov_m >= 0.9 and cov_d >= 0.8 and jacc >= 0.6
+            layers_ok = all(id(x) in d_ids or reverse.get(id(x)) in d_ids for x in m.layers)
+            if force is not None and (force == "all" or d.id in force):
+                pass  # measured on the phone: this section is rebuilt from the mobile frame
+            elif same and layers_ok:
+                continue  # the same design rearranged: media queries
+            hidden.append(d)
+            plan.setdefault(id(d), []).append(m)
+        # Mobile sections with no desktop counterpart go after the section before them.
+        last = None
+        for m in mobile.sections:
+            if id(m) in used:
+                last = next((d for d in page.sections if partner.get(id(d)) is m), last)
+                continue
+            plan.setdefault(id(last) if last is not None else 0, []).append(m)
+        for d in hidden:
+            for x in d.walk():
+                mt.pairs.pop(id(x), None)
+            mt.sections.pop(id(d), None)
+        mt.unmatched = [x for x in mt.unmatched if all(x is not y for d in hidden for y in d.walk())]
+        self._phone_plan[id(page)] = (mobile, plan)
+        return hidden
+
+    def phone_sections_html(self, page: Page, after: El | None) -> str:
+        """The mobile frame's own sections planned after `after` (None: before the first one)."""
+        mobile, plan = self._phone_plan.get(id(page), (None, {}))
+        todo = plan.get(id(after) if after is not None else 0, [])
+        if not todo or mobile is None:
+            return ""
+        saved = (self.page, self.expect, self._anchors, self.section_slug, self._stack, self._bg, self._levels,
+                 self._alt_context)  # fmt: skip
+        self.page, self.expect = mobile, self._phone_expect.setdefault(id(page), [])
+        parts = []
+        try:
+            if id(mobile) not in self._phone_ready:
+                self._phone_ready.add(id(mobile))
+                self.assign_roles()
+                self.semantics(mobile)
+                for t in (t for s_ in mobile.sections for t in _texts(s_)):
+                    if t.tag == "h1":
+                        t.tag = "h2"  # the desktop section keeps the page's one h1
+                for sec in mobile.sections:  # ids stay unique next to the desktop sections
+                    for x in sec.walk():
+                        if x.html_id and not x.html_id.startswith("m-"):
+                            x.html_id = f"m-{x.html_id}"
+                    self._retarget(sec)
+            self._stack, self._bg, self._levels = set(), set(), {}
+            for m in todo:
+                need, bg, levels = self.stacking_info(m)
+                self._stack |= need
+                self._bg |= bg
+                self._levels.update(levels)
+            for m in todo:
+                self.section_slug = f"m-{m.role or slug(m.name or 'section')}"
+                m.layout["only_mobile"] = True
+                i = mobile.sections.index(m)
+                gap = m.y - (mobile.sections[i - 1].bottom if i else 0.0)  # spacing as in the mobile frame
+                parts.append(self.render(m, {"margin-top": px(gap)} if abs(gap) > 0.5 else {}, 2))
+        finally:
+            (self.page, self.expect, self._anchors, self.section_slug, self._stack, self._bg, self._levels,
+             self._alt_context) = saved  # fmt: skip
+        return "\n".join(parts)
+
+    @staticmethod
+    def _retarget(sec: El) -> None:
+        """Anchor links inside a phone-only section point to the phone copies (m- ids)."""
+        for x in sec.walk():
+            if x.link and x.link.startswith("#") and len(x.link) > 1 and not x.link.startswith("#m-") and not (
+                x.link.startswith("#overlay-")
+            ):  # fmt: skip
+                x.link = "#m-" + x.link[1:]
+
     def find_phone_menu(self, page: Page, mobile: Page) -> None:
         """A menu icon that exists only in the mobile frame and opens an overlay (or is named Menu) is
         remembered for the site header: every page sharing that header gets the phone menu button."""
         if not page.sections:
             return
         mt, _ = self.derive_frame(page, mobile, "mobile")
+        planned = {id(x) for secs in self._phone_plan.get(id(page), (None, {}))[1].values() for s_ in secs
+                   for x in s_.walk()}  # fmt: skip
         for m in mt.mobile_only:
+            if id(m) in planned:
+                continue  # part of a section rebuilt from the mobile frame: it is there already
             act = self.inter.click_action(m.actions_node or m.node)
             named = re.search(r"\b(menu|hamburger|burger|nav(igation)?)\b", m.name or "", re.I)
             if m.kind not in ("svg", "raster", "image", "box") or max(m.w, m.h) > 64:
@@ -2494,15 +2646,23 @@ class Generator:
             gap = sec.y - prev_bottom
             placement = {"margin-top": px(gap)} if abs(gap) > 0.5 else {}
             prev_bottom = sec.bottom
+            if sec is page.sections[0]:
+                lead_in = self.phone_sections_html(page, None)
+                if lead_in:
+                    body_parts.append(lead_in)
             html_part = self.render(sec, placement, 2)
             if sec.component and sec.component not in self.components:
                 self.components[sec.component] = html_part
             body_parts.append(html_part)
+            phone = self.phone_sections_html(page, sec)
+            if phone:
+                body_parts.append(phone)
         self.fit_width = max(self.fit_width, self.content_width(page))
         self.frame_checks[filename] = [
-            (role, fpage, bp.expectations(self.expect, page, fpage, matches[role]))
+            (role, fpage, bp.expectations(self.expect, page, fpage, matches[role])
+             + (self._phone_expect.get(id(page), []) if role == "mobile" else []))
             for role, fpage in (frames or {}).items()
-        ]
+        ]  # fmt: skip
         dialogs = self.page_dialogs(page)
         # Landmarks: a leading <header> and a trailing <footer> sit outside <main>.
         lead = 1 if len(body_parts) > 1 and body_parts[0].lstrip().startswith("<header") else 0

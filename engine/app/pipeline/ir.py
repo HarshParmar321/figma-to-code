@@ -272,7 +272,12 @@ class IRBuilder:
         if root.get("layoutMode") == "VERTICAL":
             # Structured file: each top-level child is a section. Children positioned absolutely
             # ("Ignore Auto Layout", like a floating menu pill) are layers of the section they sit on.
+            kids = self._section_nodes(kids, W)
+            rb = root.get("absoluteBoundingBox") or {}
             for i, k in enumerate(kids):
+                kb = k.get("absoluteBoundingBox") or {}
+                if root.get("clipsContent") and kb and rb and kb.get("x", 0) >= rb.get("x", 0) + W:
+                    continue  # entirely outside the (clipping) frame: not visible in this design
                 if k.get("layoutPositioning") == "ABSOLUTE":
                     floating += self.flatten(k, root)
                     continue
@@ -324,6 +329,29 @@ class IRBuilder:
             frame=frame,
             name=frame.get("page") or page_name(frame["name"]),
         )
+
+    def _section_nodes(self, kids: list[dict], W: float) -> list[dict]:
+        """Top-level children of a structured page; a plain wrapper ("Main": a vertical Auto Layout
+        frame that draws nothing and only stacks full-width frames) is opened up, so each of its
+        frames is a section of its own (an id, a landmark, and its own phone layout)."""
+        out: list[dict] = []
+        for k in kids:
+            inner = [self.nodes[c] for c in k.get("children", []) if c in self.nodes]
+            frames = [c for c in inner if c.get("type") in FRAME_TYPES and c.get("visible", True)]
+            wrapper = (
+                k.get("type") == "FRAME"
+                and k.get("layoutMode") == "VERTICAL"
+                and k.get("layoutPositioning") != "ABSOLUTE"
+                and not self._draws(k)
+                and len(frames) >= 2
+                and len(frames) == len([c for c in inner if c.get("visible", True)])
+                and all(
+                    c.get("layoutSizingHorizontal") == "FILL" or (c.get("width") or 0) >= (k.get("width") or 0) - 1
+                    for c in frames
+                )
+            )
+            out += self._section_nodes(frames, W) if wrapper else [k]
+        return out
 
     @staticmethod
     def _adopt_band_frame(sec: El, page_width: float) -> None:
