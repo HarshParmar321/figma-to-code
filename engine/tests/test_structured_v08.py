@@ -51,7 +51,9 @@ def page():
          layoutSizingHorizontal="FILL", layoutSizingVertical="FILL")  # fmt: skip
     node("QT", "Quote text", "TEXT", "Q", 700, 0, 300, 22, nodes, **text("“Area changed how we work.”"))
     node("S2", "01", "FRAME", "R", 40, 400, 1200, 500, nodes, **al("VERTICAL", 10, (40, 0, 40, 0)),
-         layoutSizingHorizontal="FILL", layoutSizingVertical="HUG")  # fmt: skip
+         layoutSizingHorizontal="FILL", layoutSizingVertical="HUG", strokeWeight="MIXED", strokeTopWeight=1,
+         strokeRightWeight=0, strokeBottomWeight=0, strokeLeftWeight=0,
+         strokes=[{"type": "SOLID", "color": {"r": 0.8, "g": 0.8, "b": 0.8}}])  # fmt: skip
     node("T2", "01", "TEXT", "S2", 40, 440, 30, 34, nodes, **text("01", 24))
     node("NAV", "Nav Items", "FRAME", "R", 440, 16, 400, 60, nodes, **al("HORIZONTAL", 27, (20, 24, 20, 24)),
          layoutPositioning="ABSOLUTE", cornerRadius=100,
@@ -77,7 +79,8 @@ def test_structured_page_details(tmp_path):
     css = (tmp_path / "out" / "css" / "styles.css").read_text()
     assert re.search(r'<nav[^>]*aria-label="Main">', html)  # the floating pill is the menu
     assert not re.search(r'class="\d', html)  # "01" never becomes a class starting with a digit
-    assert "width: min(100% - 2 * var(--gutter), 1200px);" in css  # root padding: sections are a column
+    assert "margin-inline: 40px;" in css  # FILL sections stretch, keeping the root's 40px side padding
     assert css.count("flex: 1 1 590px;") == 2  # equal FILL widths even with different paddings
     assert "height: 400px;" in css  # the empty image frame keeps its fixed height
+    assert "border-top: 1px solid" in css  # a one-sided stroke (divider line) is drawn
     assert "background-size: contain;" in css and "mix-blend-mode: multiply;" in css

@@ -526,6 +526,8 @@ class Generator:
         left = max(0.0, min(c.x for c in children) - e.x - bl)
         bottom = max(0.0, e.bottom - max(c.bottom for c in children) - bb)
         right = max(0.0, e.right - max(c.right for c in children) - br)
+        if len(children) == 1 and left > 1 and abs(left - right) <= 2:
+            left = right = 0.0  # one centred child (a device mockup, a card): it stays centred at any width
         return top, right, bottom, left
 
     # ------------------------------------------------------------------ render
@@ -549,6 +551,8 @@ class Generator:
 
         if e.node is not None and e.kind not in ("wrapper", "container", "section"):
             attrs.append(f'data-figma-id="{html.escape(e.node["id"])}"')
+        if e.html_id and e.kind not in ("text", "section"):
+            attrs.append(f'id="{html.escape(e.html_id)}"')  # a "Scroll to" target inside a section
         attrs += e.link_attrs
         attrs += self.state_attrs(e, tag)
         attrs += self.motion_attrs(e)
@@ -634,8 +638,13 @@ class Generator:
                 root = self.page.root.node or {}
                 inset = (self.page.width - e.right, e.x)
                 if root.get("layoutMode") == "VERTICAL" and e.w < self.page.width - 2 and abs(inset[0] - inset[1]) <= 2:
-                    # Structured page with side padding: the section is a centred column, as in Figma.
-                    main.update({"width": f"min(100% - 2 * var(--gutter), {px(e.w)})", "margin-inline": "auto"})
+                    if (e.node or {}).get("layoutSizingHorizontal") == "FILL":
+                        # Fills the page minus the frame's side padding, as in Figma at any width.
+                        main["margin-inline"] = px(inset[1])
+                        placement["__mobile__"] = {**(placement.get("__mobile__") or {}), "margin-inline": "16px"}
+                    else:
+                        # A fixed-width section: a centred column, as in Figma.
+                        main.update({"width": f"min(100% - 2 * var(--gutter), {px(e.w)})", "margin-inline": "auto"})
                 if e.layout.get("sticky"):
                     # "Fix position when scrolling" in Figma: the header stays at the top.
                     main.update({"position": "sticky", "top": "0", "z-index": "100"})

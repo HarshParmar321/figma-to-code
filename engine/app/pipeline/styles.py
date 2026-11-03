@@ -140,10 +140,19 @@ def text_color(paints) -> str | None:
     return None
 
 
+def _stroke_weight(node: dict) -> float:
+    """Stroke weight; "Mixed" (a line on one side only, like a divider) uses the widest side."""
+    w = node.get("strokeWeight")
+    if isinstance(w, (int, float)):
+        return float(w)
+    sides = [node.get(f"stroke{s}Weight") for s in ("Top", "Right", "Bottom", "Left")]
+    return max((float(v) for v in sides if isinstance(v, (int, float))), default=0.0)
+
+
 def border(node: dict) -> dict[str, str]:
     strokes = [p for p in visible_paints(node.get("strokes")) if p["type"] == "SOLID"]
-    weight = node.get("strokeWeight")
-    if not strokes or not isinstance(weight, (int, float)) or weight <= 0:
+    weight = _stroke_weight(node)
+    if not strokes or weight <= 0:
         return {}
     c = color(strokes[-1]["color"], strokes[-1].get("opacity", 1))
     style = "dashed" if node.get("dashPattern") else "solid"
@@ -162,8 +171,8 @@ def border(node: dict) -> dict[str, str]:
 def border_widths(node: dict) -> tuple[float, float, float, float]:
     """Widths (top, right, bottom, left) that `border()` draws inside the box; 0 when none."""
     strokes = [p for p in visible_paints(node.get("strokes")) if p["type"] == "SOLID"]
-    weight = node.get("strokeWeight")
-    if not strokes or not isinstance(weight, (int, float)) or weight <= 0 or node.get("strokeAlign") == "OUTSIDE":
+    weight = _stroke_weight(node)
+    if not strokes or weight <= 0 or node.get("strokeAlign") == "OUTSIDE":
         return 0.0, 0.0, 0.0, 0.0
     sides = [node.get(f"stroke{s}Weight") for s in ("Top", "Right", "Bottom", "Left")]
     if all(isinstance(s, (int, float)) for s in sides):
