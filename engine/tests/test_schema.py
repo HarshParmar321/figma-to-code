@@ -41,3 +41,12 @@ def test_multiple_desktop_pages_allowed(bundle):
     bundle["frames"][1]["role"] = "desktop"
     bundle["frames"][1]["page"] = "About"
     assert validate_bundle(bundle) == []
+
+
+def test_same_asset_twice_is_kept_once(bundle):
+    n = len(bundle["assets"])
+    bundle["assets"].append(dict(bundle["assets"][0]))
+    assert validate_bundle(bundle) == [] and len(bundle["assets"]) == n
+    clash = dict(bundle["assets"][0], nodeId="other")
+    bundle["assets"].append(clash)
+    assert any("duplicate asset id" in e for e in validate_bundle(bundle))

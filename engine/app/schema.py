@@ -41,8 +41,15 @@ def _integrity_errors(bundle: dict) -> list[str]:
         parent = node["parentId"]
         if parent is not None and parent not in nodes:
             out.append(f"nodes/{node_id}: parentId {parent} is not in nodes")
-    asset_ids = [a["id"] for a in bundle["assets"]]
-    if len(asset_ids) != len(set(asset_ids)):
-        out.append("assets: duplicate asset ids")
+    # The same asset listed twice (older plugins could export a state image twice) is kept once;
+    # two different assets sharing an id are an error.
+    unique: dict[str, dict] = {}
+    for a in bundle["assets"]:
+        prev = unique.get(a["id"])
+        if prev is None:
+            unique[a["id"]] = a
+        elif {k: v for k, v in prev.items() if k != "byteLength"} != {k: v for k, v in a.items() if k != "byteLength"}:
+            out.append(f"assets: duplicate asset id {a['id']}")
+    bundle["assets"] = list(unique.values())
     # Any frame can be a page: without a desktop frame, the widest frames (tablet, else mobile) are.
     return out

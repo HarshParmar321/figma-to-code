@@ -105,6 +105,13 @@ async function runExport(roles: Record<string, FrameRole>) {
     assets.push(...(await exportRasters(ctx.rasterNodeIds, ctx.diagnostics)));
   }
 
+  // The same image can be reached twice (a state variant that is also an instance on the page, an icon
+  // shared by two variants): each asset id is sent once.
+  const seenAssets = new Set<string>();
+  const unique = assets.filter((a) => (seenAssets.has(a.meta.id) ? false : (seenAssets.add(a.meta.id), true)));
+  assets.length = 0;
+  assets.push(...unique);
+
   post({ type: 'progress', message: 'Collecting variables…' });
   const { variables, variableCollections } = await collectVariables(ctx.nodes, ctx.diagnostics);
 
