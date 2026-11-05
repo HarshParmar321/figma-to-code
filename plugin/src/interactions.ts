@@ -124,6 +124,24 @@ export async function collectInteractions(
       }
     }
 
+    // Taps on a layer inside the component ("Menu icon → On click → Change to Open"): only that layer
+    // starts the state. The reaction lives on the layer in the main component.
+    const inner = main.findAll((n) => n.id !== main.id && reactionsOf(n).length > 0).slice(0, 20);
+    for (const layer of inner) {
+      for (const r of reactionsOf(layer)) {
+        const kind = triggerKind(r.trigger);
+        for (const a of reactionActions(r)) {
+          if (a.type !== 'NODE' || a.navigation !== 'CHANGE_TO' || typeof a.destinationId !== 'string') continue;
+          const dest = (await figma.getNodeByIdAsync(a.destinationId)) as SceneNode | null;
+          if (!dest) continue;
+          const trigger = kind === 'enter' ? 'hover' : kind;
+          if (trigger === 'hover' || trigger === 'press' || trigger === 'click') {
+            await addState(dest, { trigger, wired: true, transition: plain(a.transition) ?? null, from: main.id, triggerLayer: layer.id });
+          }
+        }
+      }
+    }
+
     // Auto-advancing chains ("After delay → Change to" from variant to variant): carousels, tickers.
     let current: SceneNode = main;
     for (let order = 1; order <= MAX_STATES; order++) {

@@ -78,6 +78,7 @@ export interface ComponentState {
   timeout?: number; // AFTER_TIMEOUT delay in seconds
   order?: number; // position in an auto-advancing chain (carousels)
   from?: string; // variant this state is reached from (chains, toggles)
+  triggerLayer?: string; // layer inside the component that starts it (a menu icon), by id in the main component
   referenceAsset: string | null;
 }
 

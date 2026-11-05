@@ -84,6 +84,7 @@
                     "timeout": { "type": "number", "description": "AFTER_TIMEOUT delay in seconds." },
                     "order": { "type": "integer" },
                     "from": { "type": "string" },
+                    "triggerLayer": { "type": "string", "description": "Layer inside the component that starts this state (a menu icon); its id in the main component. Absent: the whole component." },
                     "referenceAsset": { "type": ["string", "null"] }
                   }
                 }

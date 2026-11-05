@@ -203,6 +203,8 @@ class Interactions:
         self.frame_ids = {f["rootId"] for f in bundle.get("frames", [])}
         # Instance node id → [(state, {page node id: change})], filled by prepare().
         self.changes: dict[str, list[dict]] = {}
+        # Instance node id → page node ids of the layers that toggle it (a menu icon, a close icon).
+        self.triggers: dict[str, list[str]] = {}
         self.notes: list[str] = []
 
     @property
@@ -251,6 +253,31 @@ class Interactions:
             self._complete(result, page_paths, base_paths)
             if result:
                 self.changes[inst["id"]] = result
+                trig = self._trigger_layers(comp, page_paths, base_paths)
+                if trig:
+                    self.triggers[inst["id"]] = trig
+
+    def _trigger_layers(self, comp: dict, page_paths: dict, base_paths: dict) -> list[str]:
+        """Layers inside the component that start a click state ("Menu icon → Change to Open") and the
+        layers in that state that change it back (a close icon): only these toggle it on the page."""
+        variants = {comp["id"]} | {s["variantId"] for s in comp["states"]}
+        out: list[str] = []
+        for state in comp["states"]:
+            layer = state.get("triggerLayer")
+            if state.get("trigger") != "click" or not layer:
+                continue
+            path = next((p for p, nid in base_paths.items() if nid == layer), None)
+            if path is not None and page_paths.get(path):
+                out.append(page_paths[path])
+            for path, nid in subtree_paths(self.nodes, state["variantId"]).items():
+                if not path:
+                    continue
+                for r in self.nodes[nid].get("reactions") or []:
+                    acts = r.get("actions") or ([r["action"]] if r.get("action") else [])
+                    back = any(a.get("navigation") == "CHANGE_TO" and a.get("destinationId") in variants for a in acts)
+                    if back and page_paths.get(path):
+                        out.append(page_paths[path])
+        return list(dict.fromkeys(out))
 
     def _complete(self, result: list[dict], page_paths: dict, base_paths: dict) -> None:
         """Hover, press and focus apply together in a browser (pressing also hovers), while Figma shows
@@ -445,6 +472,9 @@ class Interactions:
                     dcx = dcy = 0.0
             if abs(scx - 1) > 0.01 and abs(scx - scy) <= 0.02 and "border-radius" in change["css"]:
                 change["css"].pop("border-radius")  # the scale already scales the corners
+            if (path in reflow or path == ()) and is_auto(b_node) and b_node.get("clipsContent") and abs(bh - sh) > 0.5:
+                # A clipped frame that grows in this state (a dropdown opening): its height changes.
+                change["css"]["height"] = "auto" if s_node.get("layoutSizingVertical") == "HUG" else f"{_num(sh)}px"
             if max(abs(dcx), abs(dcy)) > 0.25 or abs(scx - 1) > 0.01 or abs(scy - 1) > 0.01 or abs(rot) > 0.1:
                 change["box"] = (dcx, dcy, scx, scy, rot, page_node.get("type"))
             if change["css"] or change["box"] or change["show"] is not None:
@@ -549,19 +579,28 @@ SITE_JS = """/* Behaviour from the Figma prototype: toggles, auto-play, overlays
   const all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
   // Click toggles (accordions, switches): aria-expanded / aria-pressed flips on click, Enter or Space.
+  // With data-toggle-by, only the layers marked data-toggle-trigger (a menu icon, a close icon) toggle.
   all('[data-toggle]').forEach((el) => {
     const attr = el.hasAttribute('aria-expanded') ? 'aria-expanded' : 'aria-pressed';
-    const flip = () => el.setAttribute(attr, el.getAttribute(attr) === 'true' ? 'false' : 'true');
-    el.addEventListener('click', (ev) => {
-      const inner = ev.target.closest('a[href], button');
-      if (inner && inner !== el && el.contains(inner)) return; // a link inside keeps working
-      flip();
-    });
-    el.addEventListener('keydown', (ev) => {
-      if ((ev.key === 'Enter' || ev.key === ' ') && el.tagName !== 'A' && el.tagName !== 'BUTTON') {
-        ev.preventDefault();
+    const by = el.hasAttribute('data-toggle-by');
+    const triggers = by ? all('[data-toggle-trigger]', el) : [el];
+    const flip = () => {
+      const next = el.getAttribute(attr) === 'true' ? 'false' : 'true';
+      el.setAttribute(attr, next);
+      triggers.forEach((t) => t !== el && t.setAttribute(attr, next));
+    };
+    triggers.forEach((t) => {
+      t.addEventListener('click', (ev) => {
+        const inner = ev.target.closest('a[href], button');
+        if (inner && inner !== t && t.contains(inner)) return; // a link inside keeps working
         flip();
-      }
+      });
+      t.addEventListener('keydown', (ev) => {
+        if ((ev.key === 'Enter' || ev.key === ' ') && t.tagName !== 'A' && t.tagName !== 'BUTTON') {
+          ev.preventDefault();
+          flip();
+        }
+      });
     });
   });
 

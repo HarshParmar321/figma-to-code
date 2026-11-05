@@ -193,6 +193,20 @@ cd plugin && npm run typecheck && npm test && npm run build
 
 GitHub Actions runs both suites on every push (`.github/workflows/ci.yml`).
 
+### Real designs (regression check)
+
+Every design converted in the plugin is saved under `engine/data/bundles/`. After changing the
+engine, convert all of them again and compare with the last good scores:
+
+```bash
+cd engine
+uv run python scripts/regress.py --update   # first time: record today's scores as the baseline
+uv run python scripts/regress.py            # after a change: ✗ marks any design that got worse
+```
+
+Keep a mix in there (your own files and Community templates with sliders, menus and pop-ups), so a
+fix for one design cannot quietly break another.
+
 ## Changing the bundle contract
 
 Edit `schemas/bundle.schema.json` first. Then update `plugin/src/types.ts` to match, regenerate the fixture (`python fixtures/make_sample_bundle.py`) and run both test suites.

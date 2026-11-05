@@ -952,9 +952,16 @@ def build_theme(out_dir: Path, conversion: dict, acf: str = "free", reference: P
                 placed += [(sec, "main") for sec in el.elements()]
             elif el.tag not in ("script", "noscript"):
                 placed.append((el, "foot" if seen_main else "head"))
+        used_keys: set[str] = set()
         for sec, where in placed:
             comp = sec.get("data-component")
             sec_key = sec.get("data-section") or sec.get("id") or "section"
+            if sec_key in used_keys:  # two sections with the same name ("Area"): one part each
+                sec_key = sec.get("id") if sec.get("id") and sec.get("id") not in used_keys else sec_key
+                n = 2
+                while sec_key in used_keys:
+                    sec_key, n = f"{sec.get('data-section') or 'section'}-{n}", n + 1
+            used_keys.add(sec_key)
             if comp:
                 part_slug, layout, scope, title = f"components/{comp}", field_name(comp), "global", label(comp)
             else:

@@ -46,7 +46,8 @@ COLLECT_JS = """
       loaded: el.tagName === 'IMG' ? (el.complete && el.naturalWidth > 0) : null,
     };
   }
-  const sections = [...document.querySelectorAll('[data-section]')].map(s => {
+  // Sections hidden at this width (phone-only ones on desktop, and the reverse) are not compared.
+  const sections = [...document.querySelectorAll('[data-section]')].filter(s => s.getClientRects().length).map(s => {
     const r = s.getBoundingClientRect();
     return { name: s.dataset.section, y: r.top + window.scrollY, h: r.height };
   });

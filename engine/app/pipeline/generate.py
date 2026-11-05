@@ -182,6 +182,7 @@ class Generator:
         self.components: dict[str, str] = {}  # component name -> rendered HTML (first occurrence)
         # Prototype interactions (states, links, overlays); prepared on the bundle by convert().
         self.inter: ix.Interactions = bundle.get("_interactions") or ix.Interactions(bundle)
+        self._trigger_owner = {t: inst for inst, ts in self.inter.triggers.items() for t in ts}
         self.class_of: dict[str, str] = {}  # figma node id -> its main class (for state selectors)
         self.tag_of: dict[str, str] = {}
         self.display_of: dict[str, str] = {}
@@ -656,7 +657,8 @@ class Generator:
                     main.update({"position": "sticky", "top": "0", "z-index": "100"})
                 if e.html_id:
                     attrs.append(f'id="{html.escape(e.html_id)}"')
-                attrs.append(f'data-section="{html.escape(e.role or "")}"')
+                key = f"m-{e.role or 'section'}" if e.layout.get("only_mobile") else (e.role or "")
+                attrs.append(f'data-section="{html.escape(key)}"')  # phone-only copies have their own key
                 sec_id = f"section:{self.page.frame.get('rootId', 'page')}:{e.id}"
                 attrs.append(f'data-figma-id="{html.escape(sec_id)}"')
                 self._expect({"id": sec_id, "kind": "section", "box": [e.x, e.y, e.w, e.h]})
@@ -737,7 +739,8 @@ class Generator:
                 flow, per_child = self.auto_flow_css(e, children)
                 vertical_fixed = n.get("layoutSizingVertical") == "FIXED" or (
                     n.get("layoutMode") == "VERTICAL" and n.get("primaryAxisSizingMode") == "FIXED")  # fmt: skip
-                if vertical_fixed and e.kind != "section" and children:
+                stateful = n.get("clipsContent") and n["id"] in self.inter.changes  # a header that opens
+                if vertical_fixed and (e.kind != "section" or stateful) and children:
                     # A clipping frame with a fixed height really is that tall (a closed dropdown stays
                     # closed); otherwise the height is a minimum and the content may grow.
                     box_css["height" if n.get("clipsContent") else "min-height"] = px(e.h)
@@ -1799,6 +1802,8 @@ class Generator:
         for m in mt.mobile_only:
             if id(m) in planned:
                 continue  # part of a section rebuilt from the mobile frame: it is there already
+            if m.node is not None and m.node["id"] in self._trigger_owner:
+                continue  # it opens its own component's dropdown (a prototype state), not a menu overlay
             act = self.inter.click_action(m.actions_node or m.node)
             named = re.search(r"\b(menu|hamburger|burger|nav(igation)?)\b", m.name or "", re.I)
             if m.kind not in ("svg", "raster", "image", "box") or max(m.w, m.h) > 64:
@@ -2025,7 +2030,8 @@ class Generator:
     @staticmethod
     def _reveals(states: list[dict]) -> bool:
         """A click state that shows layers (an accordion) is aria-expanded; otherwise aria-pressed."""
-        return any(c.get("show") for st in states if st["state"]["trigger"] == "click" for c in st["changes"].values())
+        return any(c.get("show") or "height" in c.get("css", {}) for st in states if st["state"]["trigger"] == "click"
+                   for c in st["changes"].values())  # fmt: skip
 
     def state_attrs(self, e: El, tag: str) -> list[str]:
         """Attributes for elements with click toggles or auto-advancing states."""
@@ -2034,10 +2040,20 @@ class Generator:
         states = self.inter.changes.get(e.node["id"]) or []
         triggers = {st["state"]["trigger"] for st in states}
         out: list[str] = []
+        owner = self._trigger_owner.get(e.node["id"])
+        if owner is not None:  # a menu icon inside a component: it toggles the component around it
+            reveals = self._reveals(self.inter.changes.get(owner) or [])
+            if tag not in ("a", "button"):
+                out += ['role="button"', 'tabindex="0"']
+            out += ["data-toggle-trigger", 'aria-expanded="false"' if reveals else 'aria-pressed="false"']
+            if not _texts(e):
+                out.append(f'aria-label="{html.escape(e.name or "Menu")}"')
         if "click" in triggers:
             reveals = self._reveals(states)
             out.append("data-toggle")
-            if tag not in ("a", "button"):
+            if self.inter.triggers.get(e.node["id"]):
+                out.append("data-toggle-by")
+            elif tag not in ("a", "button"):
                 out += ['role="button"', 'tabindex="0"']
             out.append('aria-expanded="false"' if reveals else 'aria-pressed="false"')
             self.js_features.add("toggle")
